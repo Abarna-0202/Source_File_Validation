@@ -1,0 +1,53 @@
+input_folder_text: Input File
+mapping_file: Saas_Legacy_Migration.xlsx
+count_of_records_excel: Count_of_Records.xlsx
+output_folder_parent: Output Folder
+archive_folder: Archive
+
+
+specific_words:
+  - ACCT
+  - BAL
+  - PRTY
+  - PHN
+  - EMAIL
+  - POE
+  - PADD
+  - LTRH
+  - AKA
+  - ACTH
+  - TRNH
+  - PDTR
+  - PA
+  - PS
+  - ITMZ
+  - RST
+  - CALLH
+  - MED
+  - TIG
+  - CUSTACCT
+expected_columns_per_sheet:
+  ACCT: 41
+  BAL: 29
+  PRTY: 103
+  PHN: 17
+  EMAIL: 15
+  POE: 20
+  PADD: 10
+  LTRH: 19
+  ACTH: 6
+  TRNH: 27
+  PDTR: 7
+  PA: 21
+  PS: 7
+  ITMZ: 9
+  RST: 26
+  CALLH: 42
+  TIG: 5
+  CUSTACCT: 20
+output_file_consolidated: consolidated_report.xlsx
+output_file_mapped_column: consolidated_mapped_report.xlsx
+output_entity_check: output_entity_check.xlsx
+empty_columns_summary_excel: Empty_Columns_Summary.xlsx
+required_columns_status_excel: Required_Columns_Status.xlsx
+source_file_analysis_output: Source_File_Analysis.xlsx

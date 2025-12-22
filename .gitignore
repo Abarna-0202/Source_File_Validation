@@ -1,0 +1,82 @@
+# --------------------
+
+# Python
+
+# --------------------
+
+__pycache__/
+
+*.py[cod]
+ 
+# --------------------
+
+# Logs
+
+# --------------------
+
+*.log
+ 
+# --------------------
+
+# OS files
+
+# --------------------
+
+.DS_Store
+
+Thumbs.db
+ 
+# --------------------
+
+# IDE
+
+# --------------------
+
+.idea/
+ 
+# --------------------
+
+# Build / artifacts
+
+# --------------------
+
+node_modules/
+
+dist/
+
+target/
+ 
+# --------------------
+
+# Ignore ALL data inside folders
+
+# --------------------
+
+Input File/*
+
+Output Folder/*
+
+Archive/*
+ 
+# BUT keep folder structure
+
+!Input File/.gitkeep
+
+!Output Folder/.gitkeep
+
+!Archive/.gitkeep
+ 
+# --------------------
+
+# Ignore data & outputs
+
+# --------------------
+
+*.xlsx
+!Saas_Legacy_Migration.xlsx
+
+*.txt
+
+*.csv
+
+ 
