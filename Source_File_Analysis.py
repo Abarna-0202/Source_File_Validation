@@ -2770,6 +2770,576 @@
  ## above code is working
 
 	
+# import os
+# import re
+# import chardet
+# import pandas as pd
+# from concurrent.futures import ThreadPoolExecutor, as_completed
+# from datetime import datetime
+
+# # ----------------------
+# # Configuration
+# # ----------------------
+# CHUNKSIZE = 100000  # chunk size to read per pandas.read_csv
+# MAX_WORKERS = 8     # number of threads
+# DECIMAL_PATTERN = re.compile(r'^\.\d+$')
+
+# # ----------------------
+# # Helpers
+# # ----------------------
+# def detect_encoding(file_path, sample_bytes=200000):
+#     """Detect encoding using chardet; convert ascii -> latin-1 fallback."""
+#     try:
+#         with open(file_path, 'rb') as f:
+#             raw = f.read(sample_bytes)
+#         detected = chardet.detect(raw)
+#         enc = detected.get('encoding') or 'utf-8'
+#         if enc and enc.lower() == 'ascii':
+#             return 'latin-1'
+#         return enc
+#     except Exception:
+#         return 'latin-1'
+
+# def safe_read_chunked(file_path, encoding):
+#     """
+#     Generator yielding DataFrame chunks read from file_path with given encoding.
+#     Uses engine='python' for robust parsing, on_bad_lines='skip' to handle bad rows.
+#     """
+#     try:
+#         return pd.read_csv(
+#             file_path,
+#             sep='|',
+#             header=None,
+#             dtype=str,
+#             encoding=encoding,
+#             engine='python',
+#             on_bad_lines='skip',
+#             chunksize=CHUNKSIZE,
+#             low_memory=True
+#         )
+#     except Exception:
+#         # final fallback to latin-1
+#         return pd.read_csv(
+#             file_path,
+#             sep='|',
+#             header=None,
+#             dtype=str,
+#             encoding='latin-1',
+#             engine='python',
+#             on_bad_lines='skip',
+#             chunksize=CHUNKSIZE,
+#             low_memory=True
+#         )
+
+# # ----------------------
+# # Core per-file processing (chunked)
+# # ----------------------
+# def process_single_file(filename, input_folder, mapping_data):
+#     """
+#     Process a single .txt file in chunked manner and return:
+#     (analysis_results, missing_entities, file_issues, new_validation_issues)
+#     """
+
+#     file_path = os.path.join(input_folder, filename)
+
+#     # Prepare accumulators
+#     analysis_results = []         # list of dicts: Entity, File, Column Number, Status
+#     missing_entities = set()      # set of entity names not found in mapping
+#     file_issues = []              # list of dicts for Frequent_File_Issues
+#     new_validation_issues = []    # list of dicts for Validation_Summary rows
+
+#     # Precompute mapping required positions per entity for quick checks
+#     mapping_required_positions = {}  # entity -> list of ints (positions)
+#     if mapping_data:
+#         for entity_name, sheet in mapping_data.items():
+#             pos_col = None
+#             req_col = None
+#             for c in sheet.columns:
+#                 if 'position' in c.lower():
+#                     pos_col = c
+#                 if 'required?' in c.lower():
+#                     req_col = c
+#             if pos_col and req_col:
+#                 try:
+#                     mask = sheet[req_col].astype(str).str.lower() == 'yes'
+#                     positions = pd.to_numeric(sheet.loc[mask, pos_col], errors='coerce').dropna().astype(int).tolist()
+#                     if positions:
+#                         mapping_required_positions[entity_name] = positions
+#                 except Exception:
+#                     mapping_required_positions[entity_name] = []
+
+#     # Per-file state (aggregated across chunks)
+#     decimal_issue_count = 0
+#     decimal_issue_entities = set()
+
+#     record_id_issue_count = 0
+
+#     # ITMZ (pos 3 => col index 2)
+#     itmz_date_null_count = 0
+#     itmz_found = False
+
+#     # ACCT specifics
+#     acct_invalid_count = 0
+#     acct_exp_null_count = 0
+#     acct_found = False
+
+#     # TRNH
+#     trnh_aftrtyp_null_count = 0
+#     trnh_found = False
+
+#     # CALLH phone pos9 -> index 8
+#     callh_phone_null_count = 0
+#     callh_found = False
+
+#     # PRTY first+last name checks (col6 idx5, col8 idx7)
+#     prty_both_null_count = 0
+#     prty_found = False
+
+#     # For mapping-based required column checks:
+#     # we maintain dict: entity -> pos -> any_empty (True if any empty found)
+#     required_empty_flags = {}  # entity -> {pos: bool}
+
+#     # Start reading file with encoding detection
+#     encoding = detect_encoding(file_path)
+#     try:
+#         chunk_iter = safe_read_chunked(file_path, encoding)
+#     except Exception as e:
+#         # reading failed completely
+#         new_validation_issues.append({
+#             'File': filename,
+#             'Requirement': 'File Read',
+#             'Status': 'Fail',
+#             'Count': None,
+#             'Entities': str(e)
+#         })
+#         return analysis_results, missing_entities, file_issues, new_validation_issues
+
+#     # Iterate chunks
+#     for chunk in chunk_iter:
+#         if chunk is None or chunk.shape[0] == 0:
+#             continue
+
+#         # Ensure string dtype and strip entity column
+#         chunk = chunk.fillna('')  # replace NaN with empty string for checks
+#         # strip entity column (col 0)
+#         chunk.iloc[:,0] = chunk.iloc[:,0].astype(str).str.strip()
+
+#         # DECIMAL ISSUE: check columns 1..n for values like .12
+#         for col_idx in chunk.columns[1:]:
+#             # only sample first up to 1000 rows to speed up (as original)
+#             sample_size = min(1000, len(chunk))
+#             sampled = chunk[col_idx].astype(str).iloc[:sample_size]
+#             mask = sampled.apply(lambda x: bool(DECIMAL_PATTERN.match(x)))
+#             if mask.any():
+#                 # Count across whole column in chunk
+#                 col_count = chunk[col_idx].astype(str).apply(lambda x: bool(DECIMAL_PATTERN.match(x))).sum()
+#                 decimal_issue_count += int(col_count)
+#                 # collect entities where pattern matches
+#                 # find rows in chunk where this column matches
+#                 matches = chunk.loc[chunk[col_idx].astype(str).apply(lambda x: bool(DECIMAL_PATTERN.match(x))), 0].unique().tolist()
+#                 for e in matches:
+#                     if e:
+#                         decimal_issue_entities.add(e)
+
+#         # EMPTY REC_ID: second column index 1 is REC_ID
+#         if 1 in chunk.columns:
+#             rec_mask = chunk[1].astype(str).str.strip() == ''
+#             record_id_issue_count += int(rec_mask.sum())
+#         else:
+#             # if file has no second column for rows, consider them all as missing REC_ID
+#             record_id_issue_count += len(chunk)
+
+#         # ITMZ
+#         if 0 in chunk.columns:
+#             itmz_rows = chunk[chunk[0] == 'ITMZ']
+#             if not itmz_rows.empty:
+#                 itmz_found = True
+#                 # position 3 => column index 2 (in df headerless)
+#                 if 2 in itmz_rows.columns:
+#                     itmz_date_null_count += int((itmz_rows[2].astype(str).str.strip() == '').sum())
+#                 else:
+#                     # all rows missing that column
+#                     itmz_date_null_count += len(itmz_rows)
+
+#         # # ACCT
+#         # acct_rows = chunk[chunk[0] == 'ACCT'] if 0 in chunk.columns else chunk.iloc[0:0]
+#         # if not acct_rows.empty:
+#         #     acct_found = True
+#         #     # Account ID position 2 -> col index 1
+#         #     if 1 in acct_rows.columns:
+#         #         acct_id_series = acct_rows[1].astype(str).str.strip()
+#         #         acct_invalid_count += int(((acct_id_series == '') | (acct_id_series.str.len() < 4)).sum())
+#         #     else:
+#         #         acct_invalid_count += len(acct_rows)
+#         #     # Statute expiration pos7 -> col index 6
+#         #     if 6 in acct_rows.columns:
+#         #         exp_ser = acct_rows[6].astype(str).str.strip()
+#         #         acct_exp_null_count += int((exp_ser == '').sum())
+#         #     else:
+#         #         acct_exp_null_count += len(acct_rows)
+
+#                 # ACCT
+
+#         acct_rows = chunk[chunk[0] == 'ACCT'] if 0 in chunk.columns else chunk.iloc[0:0]
+
+#         if not acct_rows.empty:
+
+#             acct_found = True
+
+#             # Account ID position 5 -> col index 4
+
+#             if 4 in acct_rows.columns:
+
+#                 acct_id_series = acct_rows[4].astype(str).str.strip()
+
+#                 acct_invalid_count += int(((acct_id_series == '') | (acct_id_series.str.len() < 4)).sum())
+
+#             else:
+
+#                 acct_invalid_count += len(acct_rows)
+
+#             # Statute expiration pos7 -> col index 6 (unchanged)
+
+#             if 6 in acct_rows.columns:
+
+#                 exp_ser = acct_rows[6].astype(str).str.strip()
+
+#                 acct_exp_null_count += int((exp_ser == '').sum())
+
+#             else:
+
+#                 acct_exp_null_count += len(acct_rows)
+ 
+
+#         # TRNH AFTRTYP pos4 -> idx3
+#         trnh_rows = chunk[chunk[0] == 'TRNH'] if 0 in chunk.columns else chunk.iloc[0:0]
+#         if not trnh_rows.empty:
+#             trnh_found = True
+#             if 3 in trnh_rows.columns:
+#                 trnh_aftrtyp_null_count += int((trnh_rows[3].astype(str).str.strip() == '').sum())
+#             else:
+#                 trnh_aftrtyp_null_count += len(trnh_rows)
+
+#         # CALLH phone pos9 -> idx8
+#         callh_rows = chunk[chunk[0] == 'CALLH'] if 0 in chunk.columns else chunk.iloc[0:0]
+#         if not callh_rows.empty:
+#             callh_found = True
+#             if 8 in callh_rows.columns:
+#                 callh_phone_null_count += int((callh_rows[8].astype(str).str.strip() == '').sum())
+#             else:
+#                 callh_phone_null_count += len(callh_rows)
+
+#         # PRTY first name col6 idx5 last name col8 idx7
+#         prty_rows = chunk[chunk[0] == 'PRTY'] if 0 in chunk.columns else chunk.iloc[0:0]
+#         if not prty_rows.empty:
+#             prty_found = True
+#             # prepare series for columns if present
+#             first_ser = prty_rows[5].astype(str).str.strip() if 5 in prty_rows.columns else pd.Series(['']*len(prty_rows), index=prty_rows.index)
+#             last_ser = prty_rows[7].astype(str).str.strip() if 7 in prty_rows.columns else pd.Series(['']*len(prty_rows), index=prty_rows.index)
+#             both_null = ((first_ser == '') & (last_ser == '')).sum()
+#             prty_both_null_count += int(both_null)
+
+#         # Mapping-based required positions: for each entity in mapping_required_positions present in chunk
+#         if mapping_required_positions:
+#             # gather unique entity names in chunk
+#             present_entities = chunk[0].unique().tolist()
+#             for ent in present_entities:
+#                 if not ent:
+#                     continue
+#                 if ent not in mapping_required_positions:
+#                     # track missing entity mapping
+#                     if ent not in mapping_data:
+#                         missing_entities.add(ent)
+#                     continue
+#                 req_positions = mapping_required_positions.get(ent, [])
+#                 if not req_positions:
+#                     continue
+#                 # initialize flags dict if not exists
+#                 if ent not in required_empty_flags:
+#                     required_empty_flags[ent] = {p: False for p in req_positions}
+#                 # filter rows for this entity
+#                 mask = chunk[0] == ent
+#                 rows_ent = chunk.loc[mask]
+#                 if rows_ent.empty:
+#                     continue
+#                 # for each required pos, check column index pos (since df columns: 0 entity, 1 pos1, 2 pos2...)
+#                 for p in req_positions:
+#                     col_idx = p  # as explained: pos p corresponds to dataframe column index p
+#                     if col_idx not in rows_ent.columns:
+#                         # If column not present in this chunk, treat rows as missing for this chunk => mark empty
+#                         required_empty_flags[ent][p] = True
+#                     else:
+#                         # check any empty values in that column for this entity
+#                         any_empty = (rows_ent[col_idx].astype(str).str.strip() == '').any()
+#                         if any_empty:
+#                             required_empty_flags[ent][p] = True
+
+#     # ----- after processing all chunks, build outputs -----
+
+#     # DECIMAL ISSUE file_issues
+#     if decimal_issue_count > 0:
+#         file_issues.append({
+#             'INPUT FILE': filename,
+#             'Requirement': 'Decimal Issues Count',
+#             'Count': decimal_issue_count,
+#             'Entities': ', '.join(sorted(decimal_issue_entities)) if decimal_issue_entities else None
+#         })
+
+#     # EMPTY REC_ID
+#     if record_id_issue_count > 0:
+#         file_issues.append({
+#             'INPUT FILE': filename,
+#             'Requirement': 'Count of Empty REC_ID',
+#             'Count': int(record_id_issue_count),
+#             'Entities': None
+#         })
+
+#     # ITMZ summary & validation entry
+#     if itmz_found:
+#         file_issues.append({
+#             'INPUT FILE': filename,
+#             'Requirement': 'Itemization Date Null Count',
+#             'Count': int(itmz_date_null_count),
+#             'Entities': 'ITMZ'
+#         })
+#         new_validation_issues.append({
+#             'File': filename,
+#             'Requirement': 'Itemization Date Null Count',
+#             'Status': 'Success' if itmz_date_null_count == 0 else 'Fail',
+#             'Count': int(itmz_date_null_count),
+#             'Entities': 'ITMZ' if itmz_date_null_count > 0 else None
+#         })
+#     else:
+#         new_validation_issues.append({
+#             'File': filename,
+#             'Requirement': 'Itemization Date Null Count',
+#             'Status': 'No Records Found',
+#             'Count': None,
+#             'Entities': None
+#         })
+
+#     # ACCT invalid & exp date
+#     if acct_found:
+#         if acct_invalid_count > 0:
+#             file_issues.append({
+#                 'INPUT FILE': filename,
+#                 'Requirement': 'Account_ID Invalid Count (Null or Length <4)',
+#                 'Count': int(acct_invalid_count),
+#                 'Entities': 'ACCT'
+#             })
+#         new_validation_issues.append({
+#             'File': filename,
+#             'Requirement': 'Account_ID Invalid Count (Null or Length <4)',
+#             'Status': 'Success' if acct_invalid_count == 0 else 'Fail',
+#             'Count': int(acct_invalid_count),
+#             'Entities': 'ACCT' if acct_invalid_count > 0 else None
+#         })
+
+#         if acct_exp_null_count > 0:
+#             file_issues.append({
+#                 'INPUT FILE': filename,
+#                 'Requirement': 'Statute Expiration Date Null Count',
+#                 'Count': int(acct_exp_null_count),
+#                 'Entities': 'ACCT'
+#             })
+#         new_validation_issues.append({
+#             'File': filename,
+#             'Requirement': 'Statute Expiration Date Null Count',
+#             'Status': 'Success' if acct_exp_null_count == 0 else 'Fail',
+#             'Count': int(acct_exp_null_count),
+#             'Entities': 'ACCT' if acct_exp_null_count > 0 else None
+#         })
+#     else:
+#         # no acct records found
+#         new_validation_issues.append({
+#             'File': filename,
+#             'Requirement': 'Account_ID Invalid Count (Null or Length <4)',
+#             'Status': 'No Records Found',
+#             'Count': None,
+#             'Entities': None
+#         })
+#         new_validation_issues.append({
+#             'File': filename,
+#             'Requirement': 'Statute Expiration Date Null Count',
+#             'Status': 'No Records Found',
+#             'Count': None,
+#             'Entities': None
+#         })
+
+#     # TRNH AFTRTYP
+#     if trnh_found:
+#         new_validation_issues.append({
+#             'File': filename,
+#             'Requirement': 'AFTRTYP Null Count',
+#             'Status': 'Success' if trnh_aftrtyp_null_count == 0 else 'Fail',
+#             'Count': int(trnh_aftrtyp_null_count),
+#             'Entities': 'TRNH' if trnh_aftrtyp_null_count > 0 else None
+#         })
+#     else:
+#         new_validation_issues.append({
+#             'File': filename,
+#             'Requirement': 'AFTRTYP Null Count',
+#             'Status': 'No Records Found',
+#             'Count': None,
+#             'Entities': None
+#         })
+
+#     # CALLH phone
+#     if callh_found:
+#         new_validation_issues.append({
+#             'File': filename,
+#             'Requirement': 'PhoneNumber Null Count',
+#             'Status': 'Success' if callh_phone_null_count == 0 else 'Fail',
+#             'Count': int(callh_phone_null_count),
+#             'Entities': 'CALLH' if callh_phone_null_count > 0 else None
+#         })
+#     else:
+#         new_validation_issues.append({
+#             'File': filename,
+#             'Requirement': 'PhoneNumber Null Count',
+#             'Status': 'No Records Found',
+#             'Count': None,
+#             'Entities': None
+#         })
+
+#     # PRTY both names null
+#     if prty_found:
+#         if prty_both_null_count > 0:
+#             file_issues.append({
+#                 'INPUT FILE': filename,
+#                 'Requirement': 'Both Firstname and Lastname Null Count',
+#                 'Count': int(prty_both_null_count),
+#                 'Entities': 'PRTY'
+#             })
+#         new_validation_issues.append({
+#             'File': filename,
+#             'Requirement': 'Both Firstname and Lastname Null Count',
+#             'Status': 'Success' if prty_both_null_count == 0 else 'Fail',
+#             'Count': int(prty_both_null_count),
+#             'Entities': 'PRTY' if prty_both_null_count > 0 else None
+#         })
+#     else:
+#         new_validation_issues.append({
+#             'File': filename,
+#             'Requirement': 'Both Firstname and Lastname Null Count',
+#             'Status': 'No Records Found',
+#             'Count': None,
+#             'Entities': None
+#         })
+
+#     # Now mapping-based required columns results -> add to analysis_results
+#     for ent, pos_flags in required_empty_flags.items():
+#         for pos, any_empty in pos_flags.items():
+#             status = 'Fail' if any_empty else 'Pass'
+#             analysis_results.append({
+#                 'Entity': ent,
+#                 'File': filename,
+#                 'Column Number': pos,
+#                 'Status': status
+#             })
+
+#     return analysis_results, missing_entities, file_issues, new_validation_issues
+
+# # ----------------------
+# # Main orchestrator
+# # ----------------------
+# def analyze_required_columns(mapping_file, input_folder, output_file):
+#     """
+#     Entry function with signature matching your main:
+#       analyze_required_columns(mapping_file, input_folder, output_file)
+#     """
+#     # validate inputs
+#     if not os.path.exists(mapping_file):
+#         print(f"Mapping file {mapping_file} does not exist.")
+#         return
+#     if not os.path.exists(input_folder):
+#         print(f"Input folder {input_folder} does not exist.")
+#         return
+
+#     # load mapping data
+#     try:
+#         mapping_data = pd.read_excel(mapping_file, sheet_name=None, header=1, engine='openpyxl')
+#         for sheet in mapping_data:
+#             mapping_data[sheet].columns = mapping_data[sheet].columns.map(str).str.strip()
+#     except Exception as e:
+#         print(f"Error reading mapping file {mapping_file}: {e}")
+#         return
+
+#     # list input txt files
+#     txt_files = [f for f in os.listdir(input_folder) if f.lower().endswith(".txt")]
+#     if not txt_files:
+#         print(f"No .txt files found in {input_folder}.")
+#         return
+
+#     # aggregators
+#     all_analysis_results = []
+#     all_missing_entities = set()
+#     all_file_issues = []
+#     all_new_validation_issues = []
+
+#     # process files in parallel
+#     with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
+#         futures = {executor.submit(process_single_file, filename, input_folder, mapping_data): filename for filename in txt_files}
+#         for future in as_completed(futures):
+#             try:
+#                 file_results, file_missing, file_issues, new_issues = future.result()
+#             except Exception as e:
+#                 # if a file processing threw unexpected error, log a generic failure entry
+#                 fn = futures[future]
+#                 all_file_issues.append({
+#                     'INPUT FILE': fn,
+#                     'Requirement': 'Processing Error',
+#                     'Count': None,
+#                     'Entities': None,
+#                     'Error': str(e)
+#                 })
+#                 continue
+
+#             if file_results:
+#                 all_analysis_results.extend(file_results)
+#             if file_missing:
+#                 all_missing_entities.update(file_missing)
+#             if file_issues:
+#                 all_file_issues.extend(file_issues)
+#             if new_issues:
+#                 all_new_validation_issues.extend(new_issues)
+
+#     # build DataFrames
+#     analysis_df = pd.DataFrame(all_analysis_results)
+#     missing_entities_df = pd.DataFrame(list(all_missing_entities), columns=['Missing Entities in SAAS mapping sheet'])
+#     file_issues_df = pd.DataFrame(all_file_issues)
+#     validation_summary_df = pd.DataFrame(all_new_validation_issues)
+
+#     # if all validations present and counts show 0, quick message
+#     if not validation_summary_df.empty and validation_summary_df['Count'].notna().sum() > 0 and validation_summary_df['Count'].fillna(0).sum() == 0:
+#         print("All new validations successful! No issues found.")
+
+#     # write outputs once
+#     try:
+#         with pd.ExcelWriter(output_file, engine="xlsxwriter") as writer:
+#             analysis_df.to_excel(writer, sheet_name='Required_Columns_Summary', index=False)
+#             missing_entities_df.to_excel(writer, sheet_name='Missing_Entities', index=False)
+#             file_issues_df.to_excel(writer, sheet_name='Frequent_File_Issues', index=False)
+#             validation_summary_df.to_excel(writer, sheet_name='Validation_Summary', index=False)
+#         print(f"Success: Analysis results saved to {output_file}")
+#     except Exception as e:
+#         print(f"Error writing to {output_file}: {e}")
+
+
+# # ----------------------
+# # CLI entrypoint (keeps previous behavior)
+# # ----------------------
+# if __name__ == "__main__":
+#     mapping_file = "Saas_Legacy_Migration.xlsx"
+#     input_folder = "Input File"
+#     output_file = "Source_File_Analysis.xlsx"
+#     start_time = datetime.now()
+#     analyze_required_columns(mapping_file, input_folder, output_file)
+#     end_time = datetime.now()
+#     print(f"Time taken: {end_time - start_time}")
+
+# # original code which is from file.
+
 import os
 import re
 import chardet
@@ -2780,31 +3350,30 @@ from datetime import datetime
 # ----------------------
 # Configuration
 # ----------------------
-CHUNKSIZE = 100000  # chunk size to read per pandas.read_csv
-MAX_WORKERS = 8     # number of threads
+CHUNKSIZE = 100000
+MAX_WORKERS = 8
+
 DECIMAL_PATTERN = re.compile(r'^\.\d+$')
+
+# Date patterns
+VALID_DATE_PATTERN = re.compile(r'^\d{2}-\d{2}-\d{4}$')
+DATE_MM_DD_YYYY_SLASH = re.compile(r'^\d{2}/\d{2}/\d{4}$')
+DATE_MM_DD_YYYY_DOT   = re.compile(r'^\d{2}\.\d{2}\.\d{4}$')
+DATE_YYYY_MM_DD       = re.compile(r'^\d{4}-\d{2}-\d{2}$')
 
 # ----------------------
 # Helpers
 # ----------------------
 def detect_encoding(file_path, sample_bytes=200000):
-    """Detect encoding using chardet; convert ascii -> latin-1 fallback."""
     try:
         with open(file_path, 'rb') as f:
             raw = f.read(sample_bytes)
-        detected = chardet.detect(raw)
-        enc = detected.get('encoding') or 'utf-8'
-        if enc and enc.lower() == 'ascii':
-            return 'latin-1'
-        return enc
+        enc = chardet.detect(raw).get('encoding') or 'utf-8'
+        return 'latin-1' if enc.lower() == 'ascii' else enc
     except Exception:
         return 'latin-1'
 
 def safe_read_chunked(file_path, encoding):
-    """
-    Generator yielding DataFrame chunks read from file_path with given encoding.
-    Uses engine='python' for robust parsing, on_bad_lines='skip' to handle bad rows.
-    """
     try:
         return pd.read_csv(
             file_path,
@@ -2818,7 +3387,6 @@ def safe_read_chunked(file_path, encoding):
             low_memory=True
         )
     except Exception:
-        # final fallback to latin-1
         return pd.read_csv(
             file_path,
             sep='|',
@@ -2832,511 +3400,267 @@ def safe_read_chunked(file_path, encoding):
         )
 
 # ----------------------
-# Core per-file processing (chunked)
+# Per-file processing
 # ----------------------
 def process_single_file(filename, input_folder, mapping_data):
-    """
-    Process a single .txt file in chunked manner and return:
-    (analysis_results, missing_entities, file_issues, new_validation_issues)
-    """
 
     file_path = os.path.join(input_folder, filename)
 
-    # Prepare accumulators
-    analysis_results = []         # list of dicts: Entity, File, Column Number, Status
-    missing_entities = set()      # set of entity names not found in mapping
-    file_issues = []              # list of dicts for Frequent_File_Issues
-    new_validation_issues = []    # list of dicts for Validation_Summary rows
+    analysis_results = []
+    missing_entities = set()
+    file_issues = []
+    validation_rows = []
 
-    # Precompute mapping required positions per entity for quick checks
-    mapping_required_positions = {}  # entity -> list of ints (positions)
-    if mapping_data:
-        for entity_name, sheet in mapping_data.items():
-            pos_col = None
-            req_col = None
-            for c in sheet.columns:
-                if 'position' in c.lower():
-                    pos_col = c
-                if 'required?' in c.lower():
-                    req_col = c
-            if pos_col and req_col:
-                try:
-                    mask = sheet[req_col].astype(str).str.lower() == 'yes'
-                    positions = pd.to_numeric(sheet.loc[mask, pos_col], errors='coerce').dropna().astype(int).tolist()
-                    if positions:
-                        mapping_required_positions[entity_name] = positions
-                except Exception:
-                    mapping_required_positions[entity_name] = []
-
-    # Per-file state (aggregated across chunks)
-    decimal_issue_count = 0
-    decimal_issue_entities = set()
-
-    record_id_issue_count = 0
-
-    # ITMZ (pos 3 => col index 2)
-    itmz_date_null_count = 0
+    # ---------------- Counters ----------------
     itmz_found = False
+    itmz_date_null_count = 0
 
-    # ACCT specifics
+    acct_found = False
     acct_invalid_count = 0
     acct_exp_null_count = 0
-    acct_found = False
+    acct_sol_null_count = 0          # pos 33 -> idx 32
+    acct_delinquency_null_count = 0  # pos 34 -> idx 33
 
-    # TRNH
-    trnh_aftrtyp_null_count = 0
     trnh_found = False
+    trnh_aftrtyp_null_count = 0
 
-    # CALLH phone pos9 -> index 8
-    callh_phone_null_count = 0
     callh_found = False
+    callh_phone_null_count = 0
 
-    # PRTY first+last name checks (col6 idx5, col8 idx7)
-    prty_both_null_count = 0
     prty_found = False
+    prty_both_null_count = 0
 
-    # For mapping-based required column checks:
-    # we maintain dict: entity -> pos -> any_empty (True if any empty found)
-    required_empty_flags = {}  # entity -> {pos: bool}
+    email_found = False
+    email_invalid_count = 0
 
-    # Start reading file with encoding detection
-    encoding = detect_encoding(file_path)
-    try:
-        chunk_iter = safe_read_chunked(file_path, encoding)
-    except Exception as e:
-        # reading failed completely
-        new_validation_issues.append({
-            'File': filename,
-            'Requirement': 'File Read',
-            'Status': 'Fail',
-            'Count': None,
-            'Entities': str(e)
-        })
-        return analysis_results, missing_entities, file_issues, new_validation_issues
+    enc_found = False
+    enc_start_date_null_count = 0
+    enc_end_date_null_count = 0
 
-    # Iterate chunks
-    for chunk in chunk_iter:
-        if chunk is None or chunk.shape[0] == 0:
+    pat_found = False
+    pat_name_missing_count = 0
+
+    date_issues = {}
+
+    # ---------------- Mapping Required Positions ----------------
+    mapping_required_positions = {}
+    for entity, sheet in mapping_data.items():
+        pos_col = None
+        req_col = None
+        for col in sheet.columns:
+            c = str(col).lower()
+            if 'position' in c:
+                pos_col = col
+            if 'required' in c or 'mandatory' in c:
+                req_col = col
+        if not pos_col or not req_col:
+            continue
+        try:
+            mask = sheet[req_col].astype(str).str.lower().isin(['yes','y','true','1'])
+            positions = pd.to_numeric(sheet.loc[mask, pos_col], errors='coerce').dropna().astype(int).tolist()
+            if positions:
+                mapping_required_positions[entity] = positions
+        except Exception:
             continue
 
-        # Ensure string dtype and strip entity column
-        chunk = chunk.fillna('')  # replace NaN with empty string for checks
-        # strip entity column (col 0)
-        chunk.iloc[:,0] = chunk.iloc[:,0].astype(str).str.strip()
+    required_empty_flags = {}
 
-        # DECIMAL ISSUE: check columns 1..n for values like .12
-        for col_idx in chunk.columns[1:]:
-            # only sample first up to 1000 rows to speed up (as original)
-            sample_size = min(1000, len(chunk))
-            sampled = chunk[col_idx].astype(str).iloc[:sample_size]
-            mask = sampled.apply(lambda x: bool(DECIMAL_PATTERN.match(x)))
-            if mask.any():
-                # Count across whole column in chunk
-                col_count = chunk[col_idx].astype(str).apply(lambda x: bool(DECIMAL_PATTERN.match(x))).sum()
-                decimal_issue_count += int(col_count)
-                # collect entities where pattern matches
-                # find rows in chunk where this column matches
-                matches = chunk.loc[chunk[col_idx].astype(str).apply(lambda x: bool(DECIMAL_PATTERN.match(x))), 0].unique().tolist()
-                for e in matches:
-                    if e:
-                        decimal_issue_entities.add(e)
+    encoding = detect_encoding(file_path)
 
-        # EMPTY REC_ID: second column index 1 is REC_ID
-        if 1 in chunk.columns:
-            rec_mask = chunk[1].astype(str).str.strip() == ''
-            record_id_issue_count += int(rec_mask.sum())
-        else:
-            # if file has no second column for rows, consider them all as missing REC_ID
-            record_id_issue_count += len(chunk)
+    for chunk in safe_read_chunked(file_path, encoding):
+        if chunk is None or chunk.empty:
+            continue
 
-        # ITMZ
-        if 0 in chunk.columns:
-            itmz_rows = chunk[chunk[0] == 'ITMZ']
-            if not itmz_rows.empty:
-                itmz_found = True
-                # position 3 => column index 2 (in df headerless)
-                if 2 in itmz_rows.columns:
-                    itmz_date_null_count += int((itmz_rows[2].astype(str).str.strip() == '').sum())
-                else:
-                    # all rows missing that column
-                    itmz_date_null_count += len(itmz_rows)
+        chunk = chunk.fillna('')
+        chunk.iloc[:, 0] = chunk.iloc[:, 0].astype(str).str.strip()
 
-        # # ACCT
-        # acct_rows = chunk[chunk[0] == 'ACCT'] if 0 in chunk.columns else chunk.iloc[0:0]
-        # if not acct_rows.empty:
-        #     acct_found = True
-        #     # Account ID position 2 -> col index 1
-        #     if 1 in acct_rows.columns:
-        #         acct_id_series = acct_rows[1].astype(str).str.strip()
-        #         acct_invalid_count += int(((acct_id_series == '') | (acct_id_series.str.len() < 4)).sum())
-        #     else:
-        #         acct_invalid_count += len(acct_rows)
-        #     # Statute expiration pos7 -> col index 6
-        #     if 6 in acct_rows.columns:
-        #         exp_ser = acct_rows[6].astype(str).str.strip()
-        #         acct_exp_null_count += int((exp_ser == '').sum())
-        #     else:
-        #         acct_exp_null_count += len(acct_rows)
+        # ---------- ITMZ ----------
+        itmz = chunk[chunk[0] == 'ITMZ']
+        if not itmz.empty:
+            itmz_found = True
+            itmz_date_null_count += ((itmz[2].astype(str).str.strip() == '').sum()
+                                     if 2 in itmz.columns else len(itmz))
 
-                # ACCT
-
-        acct_rows = chunk[chunk[0] == 'ACCT'] if 0 in chunk.columns else chunk.iloc[0:0]
-
-        if not acct_rows.empty:
-
+        # ---------- ACCT ----------
+        acct = chunk[chunk[0] == 'ACCT']
+        if not acct.empty:
             acct_found = True
+            acct_invalid_count += (((acct[4].astype(str).str.strip() == '') |
+                                    (acct[4].astype(str).str.len() < 4)).sum()
+                                    if 4 in acct.columns else len(acct))
+            acct_exp_null_count += ((acct[6].astype(str).str.strip() == '').sum()
+                                    if 6 in acct.columns else len(acct))
+            acct_sol_null_count += ((acct[32].astype(str).str.strip() == '').sum()
+                                    if 32 in acct.columns else len(acct))
+            acct_delinquency_null_count += ((acct[33].astype(str).str.strip() == '').sum()
+                                            if 33 in acct.columns else len(acct))
 
-            # Account ID position 5 -> col index 4
-
-            if 4 in acct_rows.columns:
-
-                acct_id_series = acct_rows[4].astype(str).str.strip()
-
-                acct_invalid_count += int(((acct_id_series == '') | (acct_id_series.str.len() < 4)).sum())
-
-            else:
-
-                acct_invalid_count += len(acct_rows)
-
-            # Statute expiration pos7 -> col index 6 (unchanged)
-
-            if 6 in acct_rows.columns:
-
-                exp_ser = acct_rows[6].astype(str).str.strip()
-
-                acct_exp_null_count += int((exp_ser == '').sum())
-
-            else:
-
-                acct_exp_null_count += len(acct_rows)
- 
-
-        # TRNH AFTRTYP pos4 -> idx3
-        trnh_rows = chunk[chunk[0] == 'TRNH'] if 0 in chunk.columns else chunk.iloc[0:0]
-        if not trnh_rows.empty:
+        # ---------- TRNH ----------
+        trnh = chunk[chunk[0] == 'TRNH']
+        if not trnh.empty:
             trnh_found = True
-            if 3 in trnh_rows.columns:
-                trnh_aftrtyp_null_count += int((trnh_rows[3].astype(str).str.strip() == '').sum())
-            else:
-                trnh_aftrtyp_null_count += len(trnh_rows)
+            trnh_aftrtyp_null_count += ((trnh[3].astype(str).str.strip() == '').sum()
+                                        if 3 in trnh.columns else len(trnh))
 
-        # CALLH phone pos9 -> idx8
-        callh_rows = chunk[chunk[0] == 'CALLH'] if 0 in chunk.columns else chunk.iloc[0:0]
-        if not callh_rows.empty:
+        # ---------- CALLH ----------
+        callh = chunk[chunk[0] == 'CALLH']
+        if not callh.empty:
             callh_found = True
-            if 8 in callh_rows.columns:
-                callh_phone_null_count += int((callh_rows[8].astype(str).str.strip() == '').sum())
-            else:
-                callh_phone_null_count += len(callh_rows)
+            callh_phone_null_count += ((callh[8].astype(str).str.strip() == '').sum()
+                                       if 8 in callh.columns else len(callh))
 
-        # PRTY first name col6 idx5 last name col8 idx7
-        prty_rows = chunk[chunk[0] == 'PRTY'] if 0 in chunk.columns else chunk.iloc[0:0]
-        if not prty_rows.empty:
+        # ---------- PRTY ----------
+        prty = chunk[chunk[0] == 'PRTY']
+        if not prty.empty:
             prty_found = True
-            # prepare series for columns if present
-            first_ser = prty_rows[5].astype(str).str.strip() if 5 in prty_rows.columns else pd.Series(['']*len(prty_rows), index=prty_rows.index)
-            last_ser = prty_rows[7].astype(str).str.strip() if 7 in prty_rows.columns else pd.Series(['']*len(prty_rows), index=prty_rows.index)
-            both_null = ((first_ser == '') & (last_ser == '')).sum()
-            prty_both_null_count += int(both_null)
+            fn = prty[5].astype(str).str.strip() if 5 in prty.columns else ''
+            ln = prty[7].astype(str).str.strip() if 7 in prty.columns else ''
+            prty_both_null_count += ((fn == '') & (ln == '')).sum()
 
-        # Mapping-based required positions: for each entity in mapping_required_positions present in chunk
-        if mapping_required_positions:
-            # gather unique entity names in chunk
-            present_entities = chunk[0].unique().tolist()
-            for ent in present_entities:
-                if not ent:
+        # ---------- EMAIL ----------
+        email = chunk[chunk[0] == 'EMAIL']
+        if not email.empty:
+            email_found = True
+            email_invalid_count += (
+                (email[3].astype(str).str.strip() == '') |
+                (~email[3].astype(str).str.contains('@', regex=False))
+            ).sum() if 3 in email.columns else len(email)
+
+        # ---------- ENC ----------
+        enc = chunk[chunk[0] == 'ENC']
+        if not enc.empty:
+            enc_found = True
+            enc_start_date_null_count += ((enc[6].astype(str).str.strip() == '').sum()
+                                          if 6 in enc.columns else len(enc))
+            enc_end_date_null_count += ((enc[7].astype(str).str.strip() == '').sum()
+                                        if 7 in enc.columns else len(enc))
+
+      
+        
+
+        # ---------- Mapping Required ----------
+        for ent in chunk[0].unique():
+            if ent not in mapping_required_positions:
+                if ent not in mapping_data:
+                    missing_entities.add(ent)
+                continue
+            required_empty_flags.setdefault(ent, {p: False for p in mapping_required_positions[ent]})
+            rows = chunk[chunk[0] == ent]
+            for p in mapping_required_positions[ent]:
+                if p not in rows.columns or (rows[p].astype(str).str.strip() == '').any():
+                    required_empty_flags[ent][p] = True
+
+        # ---------- Date Format ----------
+        for col in chunk.columns[1:]:
+            sample = chunk[col].astype(str).iloc[:1000]
+            for idx, val in sample.items():
+                if not val or VALID_DATE_PATTERN.match(val):
                     continue
-                if ent not in mapping_required_positions:
-                    # track missing entity mapping
-                    if ent not in mapping_data:
-                        missing_entities.add(ent)
-                    continue
-                req_positions = mapping_required_positions.get(ent, [])
-                if not req_positions:
-                    continue
-                # initialize flags dict if not exists
-                if ent not in required_empty_flags:
-                    required_empty_flags[ent] = {p: False for p in req_positions}
-                # filter rows for this entity
-                mask = chunk[0] == ent
-                rows_ent = chunk.loc[mask]
-                if rows_ent.empty:
-                    continue
-                # for each required pos, check column index pos (since df columns: 0 entity, 1 pos1, 2 pos2...)
-                for p in req_positions:
-                    col_idx = p  # as explained: pos p corresponds to dataframe column index p
-                    if col_idx not in rows_ent.columns:
-                        # If column not present in this chunk, treat rows as missing for this chunk => mark empty
-                        required_empty_flags[ent][p] = True
-                    else:
-                        # check any empty values in that column for this entity
-                        any_empty = (rows_ent[col_idx].astype(str).str.strip() == '').any()
-                        if any_empty:
-                            required_empty_flags[ent][p] = True
+                fmt = None
+                if DATE_MM_DD_YYYY_SLASH.match(val):
+                    fmt = 'MM/dd/YYYY'
+                elif DATE_MM_DD_YYYY_DOT.match(val):
+                    fmt = 'MM.dd.YYYY'
+                elif DATE_YYYY_MM_DD.match(val):
+                    fmt = 'YYYY-MM-DD'
+                if fmt:
+                    ent = chunk.at[idx, 0]
+                    date_issues.setdefault(ent, {}).setdefault(col, {'count': 0, 'format': fmt})
+                    date_issues[ent][col]['count'] += 1
 
-    # ----- after processing all chunks, build outputs -----
-
-    # DECIMAL ISSUE file_issues
-    if decimal_issue_count > 0:
-        file_issues.append({
-            'INPUT FILE': filename,
-            'Requirement': 'Decimal Issues Count',
-            'Count': decimal_issue_count,
-            'Entities': ', '.join(sorted(decimal_issue_entities)) if decimal_issue_entities else None
-        })
-
-    # EMPTY REC_ID
-    if record_id_issue_count > 0:
-        file_issues.append({
-            'INPUT FILE': filename,
-            'Requirement': 'Count of Empty REC_ID',
-            'Count': int(record_id_issue_count),
-            'Entities': None
-        })
-
-    # ITMZ summary & validation entry
-    if itmz_found:
-        file_issues.append({
-            'INPUT FILE': filename,
-            'Requirement': 'Itemization Date Null Count',
-            'Count': int(itmz_date_null_count),
-            'Entities': 'ITMZ'
-        })
-        new_validation_issues.append({
+    # ---------- Validation Summary ----------
+    def add(req, found, count, ent):
+        validation_rows.append({
             'File': filename,
-            'Requirement': 'Itemization Date Null Count',
-            'Status': 'Success' if itmz_date_null_count == 0 else 'Fail',
-            'Count': int(itmz_date_null_count),
-            'Entities': 'ITMZ' if itmz_date_null_count > 0 else None
+            'Requirement': req,
+            'Status': 'No Records Found' if not found else ('Fail' if count > 0 else 'Success'),
+            'Count': None if not found else int(count),
+            'Entities': ent if count > 0 else None
         })
+
+    add('Itemization Date Null Count', itmz_found, itmz_date_null_count, 'ITMZ')
+    add('Account_ID Invalid Count (Null or Length <4)', acct_found, acct_invalid_count, 'ACCT')
+    add('Statute Expiration Date Null Count', acct_found, acct_exp_null_count, 'ACCT')
+    add('SOL Date Null Count (Position 33)', acct_found, acct_sol_null_count, 'ACCT')
+    add('Delinquency Date Null Count (Position 34)', acct_found, acct_delinquency_null_count, 'ACCT')
+    add('AFTRTYP Null Count', trnh_found, trnh_aftrtyp_null_count, 'TRNH')
+    add('PhoneNumber Null Count', callh_found, callh_phone_null_count, 'CALLH')
+    add('Both Firstname and Lastname Null Count', prty_found, prty_both_null_count, 'PRTY')
+    add('Email Invalid Count (Missing or No @)', email_found, email_invalid_count, 'EMAIL')
+    ##add('Patient First/Last Name Missing Count', pat_found, pat_name_missing_count, 'PAT')
+    add('Service Start Date Null Count (Position 7)', enc_found, enc_start_date_null_count, 'ENC')
+    add('Service End Date Null Count (Position 8)', enc_found, enc_end_date_null_count, 'ENC')
+
+    if date_issues:
+        for ent, pos_data in date_issues.items():
+            for pos, info in pos_data.items():
+                validation_rows.append({
+                    'File': filename,
+                    'Requirement': 'Date Format Validation',
+                    'Status': 'Fail',
+                    'Count': info['count'],
+                    'Entities': f"{ent} – position {pos} – {info['format']}"
+                })
     else:
-        new_validation_issues.append({
+        validation_rows.append({
             'File': filename,
-            'Requirement': 'Itemization Date Null Count',
-            'Status': 'No Records Found',
-            'Count': None,
+            'Requirement': 'Date Format Validation',
+            'Status': 'Success',
+            'Count': 0,
             'Entities': None
         })
 
-    # ACCT invalid & exp date
-    if acct_found:
-        if acct_invalid_count > 0:
-            file_issues.append({
-                'INPUT FILE': filename,
-                'Requirement': 'Account_ID Invalid Count (Null or Length <4)',
-                'Count': int(acct_invalid_count),
-                'Entities': 'ACCT'
-            })
-        new_validation_issues.append({
-            'File': filename,
-            'Requirement': 'Account_ID Invalid Count (Null or Length <4)',
-            'Status': 'Success' if acct_invalid_count == 0 else 'Fail',
-            'Count': int(acct_invalid_count),
-            'Entities': 'ACCT' if acct_invalid_count > 0 else None
-        })
-
-        if acct_exp_null_count > 0:
-            file_issues.append({
-                'INPUT FILE': filename,
-                'Requirement': 'Statute Expiration Date Null Count',
-                'Count': int(acct_exp_null_count),
-                'Entities': 'ACCT'
-            })
-        new_validation_issues.append({
-            'File': filename,
-            'Requirement': 'Statute Expiration Date Null Count',
-            'Status': 'Success' if acct_exp_null_count == 0 else 'Fail',
-            'Count': int(acct_exp_null_count),
-            'Entities': 'ACCT' if acct_exp_null_count > 0 else None
-        })
-    else:
-        # no acct records found
-        new_validation_issues.append({
-            'File': filename,
-            'Requirement': 'Account_ID Invalid Count (Null or Length <4)',
-            'Status': 'No Records Found',
-            'Count': None,
-            'Entities': None
-        })
-        new_validation_issues.append({
-            'File': filename,
-            'Requirement': 'Statute Expiration Date Null Count',
-            'Status': 'No Records Found',
-            'Count': None,
-            'Entities': None
-        })
-
-    # TRNH AFTRTYP
-    if trnh_found:
-        new_validation_issues.append({
-            'File': filename,
-            'Requirement': 'AFTRTYP Null Count',
-            'Status': 'Success' if trnh_aftrtyp_null_count == 0 else 'Fail',
-            'Count': int(trnh_aftrtyp_null_count),
-            'Entities': 'TRNH' if trnh_aftrtyp_null_count > 0 else None
-        })
-    else:
-        new_validation_issues.append({
-            'File': filename,
-            'Requirement': 'AFTRTYP Null Count',
-            'Status': 'No Records Found',
-            'Count': None,
-            'Entities': None
-        })
-
-    # CALLH phone
-    if callh_found:
-        new_validation_issues.append({
-            'File': filename,
-            'Requirement': 'PhoneNumber Null Count',
-            'Status': 'Success' if callh_phone_null_count == 0 else 'Fail',
-            'Count': int(callh_phone_null_count),
-            'Entities': 'CALLH' if callh_phone_null_count > 0 else None
-        })
-    else:
-        new_validation_issues.append({
-            'File': filename,
-            'Requirement': 'PhoneNumber Null Count',
-            'Status': 'No Records Found',
-            'Count': None,
-            'Entities': None
-        })
-
-    # PRTY both names null
-    if prty_found:
-        if prty_both_null_count > 0:
-            file_issues.append({
-                'INPUT FILE': filename,
-                'Requirement': 'Both Firstname and Lastname Null Count',
-                'Count': int(prty_both_null_count),
-                'Entities': 'PRTY'
-            })
-        new_validation_issues.append({
-            'File': filename,
-            'Requirement': 'Both Firstname and Lastname Null Count',
-            'Status': 'Success' if prty_both_null_count == 0 else 'Fail',
-            'Count': int(prty_both_null_count),
-            'Entities': 'PRTY' if prty_both_null_count > 0 else None
-        })
-    else:
-        new_validation_issues.append({
-            'File': filename,
-            'Requirement': 'Both Firstname and Lastname Null Count',
-            'Status': 'No Records Found',
-            'Count': None,
-            'Entities': None
-        })
-
-    # Now mapping-based required columns results -> add to analysis_results
     for ent, pos_flags in required_empty_flags.items():
-        for pos, any_empty in pos_flags.items():
-            status = 'Fail' if any_empty else 'Pass'
+        for pos, failed in pos_flags.items():
             analysis_results.append({
                 'Entity': ent,
                 'File': filename,
                 'Column Number': pos,
-                'Status': status
+                'Status': 'Fail' if failed else 'Pass'
             })
 
-    return analysis_results, missing_entities, file_issues, new_validation_issues
+    return analysis_results, missing_entities, file_issues, validation_rows
 
 # ----------------------
-# Main orchestrator
+# Main
 # ----------------------
 def analyze_required_columns(mapping_file, input_folder, output_file):
-    """
-    Entry function with signature matching your main:
-      analyze_required_columns(mapping_file, input_folder, output_file)
-    """
-    # validate inputs
-    if not os.path.exists(mapping_file):
-        print(f"Mapping file {mapping_file} does not exist.")
-        return
-    if not os.path.exists(input_folder):
-        print(f"Input folder {input_folder} does not exist.")
-        return
 
-    # load mapping data
-    try:
-        mapping_data = pd.read_excel(mapping_file, sheet_name=None, header=1, engine='openpyxl')
-        for sheet in mapping_data:
-            mapping_data[sheet].columns = mapping_data[sheet].columns.map(str).str.strip()
-    except Exception as e:
-        print(f"Error reading mapping file {mapping_file}: {e}")
-        return
+    mapping_data = pd.read_excel(mapping_file, sheet_name=None, header=1)
+    for s in mapping_data:
+        mapping_data[s].columns = mapping_data[s].columns.map(str).str.strip()
 
-    # list input txt files
-    txt_files = [f for f in os.listdir(input_folder) if f.lower().endswith(".txt")]
-    if not txt_files:
-        print(f"No .txt files found in {input_folder}.")
-        return
+    txt_files = [f for f in os.listdir(input_folder) if f.lower().endswith('.txt')]
 
-    # aggregators
-    all_analysis_results = []
-    all_missing_entities = set()
-    all_file_issues = []
-    all_new_validation_issues = []
+    all_analysis, all_missing, all_file_issues, all_validations = [], set(), [], []
 
-    # process files in parallel
-    with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
-        futures = {executor.submit(process_single_file, filename, input_folder, mapping_data): filename for filename in txt_files}
-        for future in as_completed(futures):
-            try:
-                file_results, file_missing, file_issues, new_issues = future.result()
-            except Exception as e:
-                # if a file processing threw unexpected error, log a generic failure entry
-                fn = futures[future]
-                all_file_issues.append({
-                    'INPUT FILE': fn,
-                    'Requirement': 'Processing Error',
-                    'Count': None,
-                    'Entities': None,
-                    'Error': str(e)
-                })
-                continue
+    with ThreadPoolExecutor(MAX_WORKERS) as exe:
+        futures = {
+            exe.submit(process_single_file, f, input_folder, mapping_data): f
+            for f in txt_files
+        }
+        for fut in as_completed(futures):
+            a, m, fi, v = fut.result()
+            all_analysis.extend(a)
+            all_missing.update(m)
+            all_file_issues.extend(fi)
+            all_validations.extend(v)
 
-            if file_results:
-                all_analysis_results.extend(file_results)
-            if file_missing:
-                all_missing_entities.update(file_missing)
-            if file_issues:
-                all_file_issues.extend(file_issues)
-            if new_issues:
-                all_new_validation_issues.extend(new_issues)
-
-    # build DataFrames
-    analysis_df = pd.DataFrame(all_analysis_results)
-    missing_entities_df = pd.DataFrame(list(all_missing_entities), columns=['Missing Entities in SAAS mapping sheet'])
-    file_issues_df = pd.DataFrame(all_file_issues)
-    validation_summary_df = pd.DataFrame(all_new_validation_issues)
-
-    # if all validations present and counts show 0, quick message
-    if not validation_summary_df.empty and validation_summary_df['Count'].notna().sum() > 0 and validation_summary_df['Count'].fillna(0).sum() == 0:
-        print("All new validations successful! No issues found.")
-
-    # write outputs once
-    try:
-        with pd.ExcelWriter(output_file, engine="xlsxwriter") as writer:
-            analysis_df.to_excel(writer, sheet_name='Required_Columns_Summary', index=False)
-            missing_entities_df.to_excel(writer, sheet_name='Missing_Entities', index=False)
-            file_issues_df.to_excel(writer, sheet_name='Frequent_File_Issues', index=False)
-            validation_summary_df.to_excel(writer, sheet_name='Validation_Summary', index=False)
-        print(f"Success: Analysis results saved to {output_file}")
-    except Exception as e:
-        print(f"Error writing to {output_file}: {e}")
-
+    with pd.ExcelWriter(output_file, engine='xlsxwriter') as w:
+        pd.DataFrame(all_analysis).to_excel(w, 'Required_Columns_Summary', index=False)
+        pd.DataFrame(list(all_missing), columns=['Missing Entities in SAAS mapping sheet']).to_excel(w, 'Missing_Entities', index=False)
+        pd.DataFrame(all_file_issues).to_excel(w, 'Frequent_File_Issues', index=False)
+        pd.DataFrame(all_validations).to_excel(w, 'Validation_Summary', index=False)
 
 # ----------------------
-# CLI entrypoint (keeps previous behavior)
+# CLI
 # ----------------------
 if __name__ == "__main__":
-    mapping_file = "Saas_Legacy_Migration.xlsx"
-    input_folder = "Input File"
-    output_file = "Source_File_Analysis.xlsx"
-    start_time = datetime.now()
-    analyze_required_columns(mapping_file, input_folder, output_file)
-    end_time = datetime.now()
-    print(f"Time taken: {end_time - start_time}")
-
-# original code which is from file.
-
+    start = datetime.now()
+    analyze_required_columns(
+        "Saas_Legacy_Migration.xlsx",
+        "Input File",
+        "Source_File_Analysis.xlsx"
+    )
+    print("Time taken:", datetime.now() - start)
+ 
