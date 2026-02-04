@@ -3340,188 +3340,533 @@
 
 # # original code which is from file.
 
+# import os
+# import re
+# import chardet
+# import pandas as pd
+# from concurrent.futures import ThreadPoolExecutor, as_completed
+# from datetime import datetime
+
+# # ================= CONFIG =================
+# CHUNKSIZE = 100000
+# MAX_WORKERS = 8
+
+# VALID_DATE_PATTERN = re.compile(r'^\d{2}-\d{2}-\d{4}$')
+# DATE_MM_DD_YYYY_SLASH = re.compile(r'^\d{2}/\d{2}/\d{4}$')
+# DATE_MM_DD_YYYY_DOT   = re.compile(r'^\d{2}\.\d{2}\.\d{4}$')
+# DATE_YYYY_MM_DD       = re.compile(r'^\d{4}-\d{2}-\d{2}$')
+
+# FORCE_REQUIRED_ENTITIES = {'PRTY'}
+
+# # ================= HELPERS =================
+# def detect_encoding(path, size=200000):
+#     try:
+#         with open(path, 'rb') as f:
+#             raw = f.read(size)
+#         enc = chardet.detect(raw).get('encoding') or 'utf-8'
+#         return 'latin-1' if enc.lower() == 'ascii' else enc
+#     except Exception:
+#         return 'latin-1'
+
+# def safe_read_chunked(path, encoding):
+#     return pd.read_csv(
+#         path, sep='|', header=None, dtype=str,
+#         encoding=encoding, engine='python',
+#         on_bad_lines='skip', chunksize=CHUNKSIZE
+#     )
+
+# # ================= FILE PROCESS =================
+# def process_single_file(filename, folder, mapping_data):
+
+#     path = os.path.join(folder, filename)
+
+#     required_summary = {}
+#     validations = []
+
+#     acct_found = False
+#     acct_invalid = 0
+#     acct_statute_null = 0
+#     acct_all_three_missing = 0
+
+#     phone_found = False
+#     phone_null = 0
+
+#     email_found = False
+#     email_invalid = 0
+
+#     enc_found = False
+#     enc_start_null = 0
+#     enc_end_null = 0
+
+#     # ---------- DIAGCD ----------
+#     diagcd_found = False
+#     diagcd_invalid_type_count = 0
+
+#     # ---------- LCASE ----------
+#     lcase_found = False
+#     lcase_caseid_null = 0      # 3rd field
+#     lcase_courtid_null = 0     # 15th field
+
+#     date_issues = {}
+
+#     # ---------- Build required columns from mapping ----------
+#     mapping_required = {}
+
+#     for raw_entity, sheet in mapping_data.items():
+#         entity = str(raw_entity).strip().upper()
+
+#         pos_col = None
+#         req_col = None
+#         for c in sheet.columns:
+#             cl = str(c).lower()
+#             if 'position' in cl:
+#                 pos_col = c
+#             if 'required' in cl or 'mandatory' in cl:
+#                 req_col = c
+
+#         if not pos_col or not req_col:
+#             continue
+
+#         mask = sheet[req_col].astype(str).str.lower().isin(['yes','y','true','1'])
+#         positions = pd.to_numeric(
+#             sheet.loc[mask, pos_col], errors='coerce'
+#         ).dropna().astype(int).tolist()
+
+#         if positions:
+#             mapping_required[entity] = positions
+
+#     # ---------- Force include PRTY ----------
+#     for forced in FORCE_REQUIRED_ENTITIES:
+#         if forced in mapping_data and forced not in mapping_required:
+#             sheet = mapping_data[forced]
+#             pos_col = None
+#             for c in sheet.columns:
+#                 if 'position' in str(c).lower():
+#                     pos_col = c
+#             if pos_col:
+#                 positions = pd.to_numeric(
+#                     sheet[pos_col], errors='coerce'
+#                 ).dropna().astype(int).tolist()
+#                 if positions:
+#                     mapping_required[forced] = positions
+
+#     encoding = detect_encoding(path)
+
+#     for chunk in safe_read_chunked(path, encoding):
+#         if chunk.empty:
+#             continue
+
+#         chunk = chunk.fillna('')
+#         chunk.iloc[:,0] = chunk.iloc[:,0].astype(str).str.strip().str.upper()
+
+#         # ---------- Required Columns Summary ----------
+#         for ent, positions in mapping_required.items():
+#             rows = chunk[chunk[0] == ent]
+#             if rows.empty:
+#                 continue
+
+#             for p in positions:
+#                 key = (ent, p)
+#                 required_summary.setdefault(key, {
+#                     'Entity': ent,
+#                     'File': filename,
+#                     'Column Number': p,
+#                     'Total Records': 0,
+#                     'Empty Records': 0
+#                 })
+
+#                 required_summary[key]['Total Records'] += len(rows)
+
+#                 if p not in rows.columns:
+#                     required_summary[key]['Empty Records'] += len(rows)
+#                 else:
+#                     required_summary[key]['Empty Records'] += (
+#                         rows[p].astype(str).str.strip() == ''
+#                     ).sum()
+
+#         # ---------- ACCT ----------
+#         acct = chunk[chunk[0] == 'ACCT']
+#         if not acct.empty:
+#             acct_found = True
+#             acct_invalid += (
+#                 ((acct[4].astype(str).str.strip() == '') |
+#                  (acct[4].astype(str).str.len() < 4)).sum()
+#                 if 4 in acct.columns else len(acct)
+#             )
+#             acct_statute_null += (
+#                 (acct[6].astype(str).str.strip() == '').sum()
+#                 if 6 in acct.columns else len(acct)
+#             )
+#             service = acct[5].astype(str).str.strip() if 5 in acct.columns else ''
+#             delinq  = acct[32].astype(str).str.strip() if 32 in acct.columns else ''
+#             statute = acct[33].astype(str).str.strip() if 33 in acct.columns else ''
+#             acct_all_three_missing += (
+#                 ((service == '') & (delinq == '') & (statute == '')).sum()
+#             )
+
+#         # ---------- PHN ----------
+#         phn = chunk[chunk[0] == 'PHN']
+#         if not phn.empty:
+#             phone_found = True
+#             phone_null += (
+#                 (phn[3].astype(str).str.strip() == '').sum()
+#                 if 3 in phn.columns else len(phn)
+#             )
+
+#         # ---------- EMAIL ----------
+#         email = chunk[chunk[0] == 'EMAIL']
+#         if not email.empty:
+#             email_found = True
+#             email_invalid += (
+#                 (email[3].astype(str).str.strip() == '') |
+#                 (~email[3].astype(str).str.contains('@', regex=False))
+#             ).sum() if 3 in email.columns else len(email)
+
+#         # ---------- ENC ----------
+#         enc = chunk[chunk[0] == 'ENC']
+#         if not enc.empty:
+#             enc_found = True
+#             enc_start_null += (
+#                 (enc[6].astype(str).str.strip() == '').sum()
+#                 if 6 in enc.columns else len(enc)
+#             )
+#             enc_end_null += (
+#                 (enc[7].astype(str).str.strip() == '').sum()
+#                 if 7 in enc.columns else len(enc)
+#             )
+
+#         # ---------- DIAGCD ----------
+#         diagcd = chunk[chunk[0] == 'DIAGCD']
+#         if not diagcd.empty:
+#             diagcd_found = True
+#             if 4 in diagcd.columns:
+#                 invalid_mask = ~diagcd[4].astype(str).str.upper().isin(['ENCOUNTER', 'CLAIM'])
+#                 diagcd_invalid_type_count += invalid_mask.sum()
+#             else:
+#                 diagcd_invalid_type_count += len(diagcd)
+
+#         # ---------- LCASE ----------
+#         lcase = chunk[chunk[0] == 'LCASE']
+#         if not lcase.empty:
+#             lcase_found = True
+
+#             # 3rd field – Case ID
+#             lcase_caseid_null += (
+#                 (lcase[2].astype(str).str.strip() == '').sum()
+#                 if 2 in lcase.columns else len(lcase)
+#             )
+
+#             # 15th field – Court ID
+#             lcase_courtid_null += (
+#                 (lcase[14].astype(str).str.strip() == '').sum()
+#                 if 14 in lcase.columns else len(lcase)
+#             )
+
+#         # ---------- Date Format ----------
+#         for col in chunk.columns[1:]:
+#             for idx, val in chunk[col].astype(str).iloc[:1000].items():
+#                 if not val or VALID_DATE_PATTERN.match(val):
+#                     continue
+
+#                 fmt = None
+#                 if DATE_MM_DD_YYYY_SLASH.match(val):
+#                     fmt = 'MM/dd/YYYY'
+#                 elif DATE_MM_DD_YYYY_DOT.match(val):
+#                     fmt = 'MM.dd.YYYY'
+#                 elif DATE_YYYY_MM_DD.match(val):
+#                     fmt = 'YYYY-MM-DD'
+
+#                 if fmt:
+#                     ent = chunk.at[idx, 0]
+#                     date_issues.setdefault(ent, {}).setdefault(
+#                         col, {'count': 0, 'format': fmt}
+#                     )
+#                     date_issues[ent][col]['count'] += 1
+
+#     # ---------- Validation Summary ----------
+#     def add(req, found, count, ent):
+#         validations.append({
+#             'File': filename,
+#             'Requirement': req,
+#             'Status': 'No Records Found' if not found else ('Fail' if count > 0 else 'Success'),
+#             'Count': None if not found else int(count),
+#             'Entities': ent if count > 0 else None
+#         })
+
+#     add('Account_ID Invalid Count', acct_found, acct_invalid, 'ACCT')
+#     add('Statute Expiration Date Null Count', acct_found, acct_statute_null, 'ACCT')
+#     add('ACCT – Service / Delinquency / Statute Date Presence Check',
+#         acct_found, acct_all_three_missing, 'ACCT')
+#     add('PhoneNumber Null Count', phone_found, phone_null, 'PHN')
+#     add('Email Invalid Count (Missing or No @)', email_found, email_invalid, 'EMAIL')
+#     add('Service Start Date Null Count', enc_found, enc_start_null, 'ENC')
+#     add('Service End Date Null Count', enc_found, enc_end_null, 'ENC')
+
+#     add('DIAGCD Type Invalid Count (Expected ENCOUNTER / CLAIM)',
+#         diagcd_found, diagcd_invalid_type_count, 'DIAGCD')
+
+#     add('LCASE Case ID (3rd field) Null Count',
+#         lcase_found, lcase_caseid_null, 'LCASE')
+
+#     add('LCASE Court ID (15th field) Null Count',
+#         lcase_found, lcase_courtid_null, 'LCASE')
+
+#     if date_issues:
+#         for ent, pdata in date_issues.items():
+#             for pos, info in pdata.items():
+#                 validations.append({
+#                     'File': filename,
+#                     'Requirement': 'Date Format Validation',
+#                     'Status': 'Fail',
+#                     'Count': info['count'],
+#                     'Entities': f"{ent} – position {pos} – {info['format']}"
+#                 })
+#     else:
+#         validations.append({
+#             'File': filename,
+#             'Requirement': 'Date Format Validation',
+#             'Status': 'Success',
+#             'Count': 0,
+#             'Entities': None
+#         })
+
+#     return list(required_summary.values()), validations
+
+# # ================= MAIN =================
+# def analyze_required_columns(mapping_file, input_folder, output_file):
+
+#     mapping_data = pd.read_excel(mapping_file, sheet_name=None, header=1)
+#     for s in mapping_data:
+#         mapping_data[s].columns = mapping_data[s].columns.map(str).str.strip()
+
+#     txt_files = [f for f in os.listdir(input_folder) if f.lower().endswith('.txt')]
+
+#     all_required = []
+#     all_validations = []
+
+#     with ThreadPoolExecutor(MAX_WORKERS) as exe:
+#         futures = {
+#             exe.submit(process_single_file, f, input_folder, mapping_data): f
+#             for f in txt_files
+#         }
+#         for fut in as_completed(futures):
+#             req, val = fut.result()
+#             all_required.extend(req)
+#             all_validations.extend(val)
+
+#     req_df = pd.DataFrame(all_required)
+#     req_df['Status'] = req_df.apply(
+#         lambda r: 'Fail' if r['Empty Records'] > 0 else 'Pass', axis=1
+#     )
+
+#     with pd.ExcelWriter(output_file, engine='xlsxwriter') as w:
+#         req_df.to_excel(w, 'Required_Columns_Summary', index=False)
+#         pd.DataFrame(all_validations).to_excel(w, 'Validation_Summary', index=False)
+
+# # ================= CLI =================
+# if __name__ == "__main__":
+#     start = datetime.now()
+#     analyze_required_columns(
+#         "Saas_Legacy_Migration.xlsx",
+#         "Input File",
+#         "Source_File_Analysis.xlsx"
+#     )
+#     print("Time taken:", datetime.now() - start)
+ 
+## last updated query
+
 import os
 import re
 import chardet
+import csv
 import pandas as pd
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 
-# ----------------------
-# Configuration
-# ----------------------
+# ================= CONFIG =================
 CHUNKSIZE = 100000
 MAX_WORKERS = 8
 
-DECIMAL_PATTERN = re.compile(r'^\.\d+$')
-
-# Date patterns
 VALID_DATE_PATTERN = re.compile(r'^\d{2}-\d{2}-\d{4}$')
 DATE_MM_DD_YYYY_SLASH = re.compile(r'^\d{2}/\d{2}/\d{4}$')
 DATE_MM_DD_YYYY_DOT   = re.compile(r'^\d{2}\.\d{2}\.\d{4}$')
 DATE_YYYY_MM_DD       = re.compile(r'^\d{4}-\d{2}-\d{2}$')
 
-# ----------------------
-# Helpers
-# ----------------------
-def detect_encoding(file_path, sample_bytes=200000):
+FORCE_REQUIRED_ENTITIES = {'PRTY'}
+
+# ================= HELPERS =================
+def detect_encoding(path, size=200000):
     try:
-        with open(file_path, 'rb') as f:
-            raw = f.read(sample_bytes)
+        with open(path, 'rb') as f:
+            raw = f.read(size)
         enc = chardet.detect(raw).get('encoding') or 'utf-8'
         return 'latin-1' if enc.lower() == 'ascii' else enc
     except Exception:
         return 'latin-1'
 
-def safe_read_chunked(file_path, encoding):
-    try:
-        return pd.read_csv(
-            file_path,
-            sep='|',
-            header=None,
-            dtype=str,
-            encoding=encoding,
-            engine='python',
-            on_bad_lines='skip',
-            chunksize=CHUNKSIZE,
-            low_memory=True
-        )
-    except Exception:
-        return pd.read_csv(
-            file_path,
-            sep='|',
-            header=None,
-            dtype=str,
-            encoding='latin-1',
-            engine='python',
-            on_bad_lines='skip',
-            chunksize=CHUNKSIZE,
-            low_memory=True
-        )
 
-# ----------------------
-# Per-file processing
-# ----------------------
-def process_single_file(filename, input_folder, mapping_data):
+def safe_read_chunked(path, encoding):
+    """
+    FINAL FIX:
+    - Disable ALL quote parsing
+    - Treat everything as plain string
+    - Allow ALL special characters
+    """
+    return pd.read_csv(
+        path,
+        sep='|',
+        header=None,
+        dtype=str,
+        encoding=encoding,
+        engine='python',
+        quoting=csv.QUOTE_NONE,   # 🔑 disable quote parsing
+        quotechar=None,           # 🔑 treat " as normal character
+        escapechar='\\',
+        on_bad_lines='skip',
+        chunksize=CHUNKSIZE
+    )
 
-    file_path = os.path.join(input_folder, filename)
+# ================= FILE PROCESS =================
+def process_single_file(filename, folder, mapping_data):
 
-    analysis_results = []
-    missing_entities = set()
-    file_issues = []
-    validation_rows = []
+    path = os.path.join(folder, filename)
 
-    # ---------------- Counters ----------------
-    itmz_found = False
-    itmz_date_null_count = 0
+    required_summary = {}
+    validations = []
 
     acct_found = False
-    acct_invalid_count = 0
-    acct_exp_null_count = 0
-    acct_sol_null_count = 0          # pos 33 -> idx 32
-    acct_delinquency_null_count = 0  # pos 34 -> idx 33
+    acct_invalid = 0
+    acct_statute_null = 0
+    acct_all_three_missing = 0
 
-    trnh_found = False
-    trnh_aftrtyp_null_count = 0
-
-    callh_found = False
-    callh_phone_null_count = 0
-
-    prty_found = False
-    prty_both_null_count = 0
+    phone_found = False
+    phone_null = 0
 
     email_found = False
-    email_invalid_count = 0
+    email_invalid = 0
 
     enc_found = False
-    enc_start_date_null_count = 0
-    enc_end_date_null_count = 0
+    enc_start_null = 0
+    enc_end_null = 0
 
-    pat_found = False
-    pat_name_missing_count = 0
+    diagcd_found = False
+    diagcd_invalid_type_count = 0
+
+    lcase_found = False
+    lcase_caseid_null = 0
+    lcase_courtid_null = 0
 
     date_issues = {}
 
-    # ---------------- Mapping Required Positions ----------------
-    mapping_required_positions = {}
-    for entity, sheet in mapping_data.items():
+    # ---------- Build required columns from mapping ----------
+    mapping_required = {}
+
+    for raw_entity, sheet in mapping_data.items():
+        entity = str(raw_entity).strip().upper()
+
         pos_col = None
         req_col = None
-        for col in sheet.columns:
-            c = str(col).lower()
-            if 'position' in c:
-                pos_col = col
-            if 'required' in c or 'mandatory' in c:
-                req_col = col
+        for c in sheet.columns:
+            cl = str(c).lower()
+            if 'position' in cl:
+                pos_col = c
+            if 'required' in cl or 'mandatory' in cl:
+                req_col = c
+
         if not pos_col or not req_col:
             continue
-        try:
-            mask = sheet[req_col].astype(str).str.lower().isin(['yes','y','true','1'])
-            positions = pd.to_numeric(sheet.loc[mask, pos_col], errors='coerce').dropna().astype(int).tolist()
-            if positions:
-                mapping_required_positions[entity] = positions
-        except Exception:
-            continue
 
-    required_empty_flags = {}
+        mask = sheet[req_col].astype(str).str.lower().isin(['yes','y','true','1'])
+        positions = pd.to_numeric(
+            sheet.loc[mask, pos_col], errors='coerce'
+        ).dropna().astype(int).tolist()
 
-    encoding = detect_encoding(file_path)
+        if positions:
+            mapping_required[entity] = positions
 
-    for chunk in safe_read_chunked(file_path, encoding):
-        if chunk is None or chunk.empty:
+    # ---------- Force include PRTY ----------
+    for forced in FORCE_REQUIRED_ENTITIES:
+        if forced in mapping_data and forced not in mapping_required:
+            sheet = mapping_data[forced]
+            pos_col = None
+            for c in sheet.columns:
+                if 'position' in str(c).lower():
+                    pos_col = c
+            if pos_col:
+                positions = pd.to_numeric(
+                    sheet[pos_col], errors='coerce'
+                ).dropna().astype(int).tolist()
+                if positions:
+                    mapping_required[forced] = positions
+
+    encoding = detect_encoding(path)
+
+    for chunk in safe_read_chunked(path, encoding):
+        if chunk.empty:
             continue
 
         chunk = chunk.fillna('')
-        chunk.iloc[:, 0] = chunk.iloc[:, 0].astype(str).str.strip()
+        chunk.iloc[:, 0] = chunk.iloc[:, 0].astype(str).str.strip().str.upper()
 
-        # ---------- ITMZ ----------
-        itmz = chunk[chunk[0] == 'ITMZ']
-        if not itmz.empty:
-            itmz_found = True
-            itmz_date_null_count += ((itmz[2].astype(str).str.strip() == '').sum()
-                                     if 2 in itmz.columns else len(itmz))
+        # ---------- Required Columns Summary ----------
+        for ent, positions in mapping_required.items():
+            rows = chunk[chunk[0] == ent]
+            if rows.empty:
+                continue
+
+            for p in positions:
+                key = (ent, p)
+                required_summary.setdefault(key, {
+                    'Entity': ent,
+                    'File': filename,
+                    'Column Number': p,
+                    'Total Records': 0,
+                    'Empty Records': 0
+                })
+
+                required_summary[key]['Total Records'] += len(rows)
+
+                if p not in rows.columns:
+                    required_summary[key]['Empty Records'] += len(rows)
+                else:
+                    required_summary[key]['Empty Records'] += (
+                        rows[p].astype(str).str.strip() == ''
+                    ).sum()
 
         # ---------- ACCT ----------
         acct = chunk[chunk[0] == 'ACCT']
         if not acct.empty:
             acct_found = True
-            acct_invalid_count += (((acct[4].astype(str).str.strip() == '') |
-                                    (acct[4].astype(str).str.len() < 4)).sum()
-                                    if 4 in acct.columns else len(acct))
-            acct_exp_null_count += ((acct[6].astype(str).str.strip() == '').sum()
-                                    if 6 in acct.columns else len(acct))
-            acct_sol_null_count += ((acct[32].astype(str).str.strip() == '').sum()
-                                    if 32 in acct.columns else len(acct))
-            acct_delinquency_null_count += ((acct[33].astype(str).str.strip() == '').sum()
-                                            if 33 in acct.columns else len(acct))
+            acct_invalid += (
+                ((acct[4].astype(str).str.strip() == '') |
+                 (acct[4].astype(str).str.len() < 4)).sum()
+                if 4 in acct.columns else len(acct)
+            )
+            acct_statute_null += (
+                (acct[6].astype(str).str.strip() == '').sum()
+                if 6 in acct.columns else len(acct)
+            )
+            service = acct[5].astype(str).str.strip() if 5 in acct.columns else ''
+            delinq  = acct[32].astype(str).str.strip() if 32 in acct.columns else ''
+            statute = acct[33].astype(str).str.strip() if 33 in acct.columns else ''
+            acct_all_three_missing += (
+                ((service == '') & (delinq == '') & (statute == '')).sum()
+            )
 
-        # ---------- TRNH ----------
-        trnh = chunk[chunk[0] == 'TRNH']
-        if not trnh.empty:
-            trnh_found = True
-            trnh_aftrtyp_null_count += ((trnh[3].astype(str).str.strip() == '').sum()
-                                        if 3 in trnh.columns else len(trnh))
-
-        # ---------- CALLH ----------
-        callh = chunk[chunk[0] == 'CALLH']
-        if not callh.empty:
-            callh_found = True
-            callh_phone_null_count += ((callh[8].astype(str).str.strip() == '').sum()
-                                       if 8 in callh.columns else len(callh))
-
-        # ---------- PRTY ----------
-        prty = chunk[chunk[0] == 'PRTY']
-        if not prty.empty:
-            prty_found = True
-            fn = prty[5].astype(str).str.strip() if 5 in prty.columns else ''
-            ln = prty[7].astype(str).str.strip() if 7 in prty.columns else ''
-            prty_both_null_count += ((fn == '') & (ln == '')).sum()
+        # ---------- PHN ----------
+        phn = chunk[chunk[0] == 'PHN']
+        if not phn.empty:
+            phone_found = True
+            phone_null += (
+                (phn[3].astype(str).str.strip() == '').sum()
+                if 3 in phn.columns else len(phn)
+            )
 
         # ---------- EMAIL ----------
         email = chunk[chunk[0] == 'EMAIL']
         if not email.empty:
             email_found = True
-            email_invalid_count += (
+            email_invalid += (
                 (email[3].astype(str).str.strip() == '') |
                 (~email[3].astype(str).str.contains('@', regex=False))
             ).sum() if 3 in email.columns else len(email)
@@ -3530,32 +3875,44 @@ def process_single_file(filename, input_folder, mapping_data):
         enc = chunk[chunk[0] == 'ENC']
         if not enc.empty:
             enc_found = True
-            enc_start_date_null_count += ((enc[6].astype(str).str.strip() == '').sum()
-                                          if 6 in enc.columns else len(enc))
-            enc_end_date_null_count += ((enc[7].astype(str).str.strip() == '').sum()
-                                        if 7 in enc.columns else len(enc))
+            enc_start_null += (
+                (enc[6].astype(str).str.strip() == '').sum()
+                if 6 in enc.columns else len(enc)
+            )
+            enc_end_null += (
+                (enc[7].astype(str).str.strip() == '').sum()
+                if 7 in enc.columns else len(enc)
+            )
 
-      
-        
+        # ---------- DIAGCD ----------
+        diagcd = chunk[chunk[0] == 'DIAGCD']
+        if not diagcd.empty:
+            diagcd_found = True
+            if 4 in diagcd.columns:
+                invalid_mask = ~diagcd[4].astype(str).str.upper().isin(['ENCOUNTER', 'CLAIM'])
+                diagcd_invalid_type_count += invalid_mask.sum()
+            else:
+                diagcd_invalid_type_count += len(diagcd)
 
-        # ---------- Mapping Required ----------
-        for ent in chunk[0].unique():
-            if ent not in mapping_required_positions:
-                if ent not in mapping_data:
-                    missing_entities.add(ent)
-                continue
-            required_empty_flags.setdefault(ent, {p: False for p in mapping_required_positions[ent]})
-            rows = chunk[chunk[0] == ent]
-            for p in mapping_required_positions[ent]:
-                if p not in rows.columns or (rows[p].astype(str).str.strip() == '').any():
-                    required_empty_flags[ent][p] = True
+        # ---------- LCASE ----------
+        lcase = chunk[chunk[0] == 'LCASE']
+        if not lcase.empty:
+            lcase_found = True
+            lcase_caseid_null += (
+                (lcase[2].astype(str).str.strip() == '').sum()
+                if 2 in lcase.columns else len(lcase)
+            )
+            lcase_courtid_null += (
+                (lcase[14].astype(str).str.strip() == '').sum()
+                if 14 in lcase.columns else len(lcase)
+            )
 
         # ---------- Date Format ----------
         for col in chunk.columns[1:]:
-            sample = chunk[col].astype(str).iloc[:1000]
-            for idx, val in sample.items():
+            for idx, val in chunk[col].astype(str).iloc[:1000].items():
                 if not val or VALID_DATE_PATTERN.match(val):
                     continue
+
                 fmt = None
                 if DATE_MM_DD_YYYY_SLASH.match(val):
                     fmt = 'MM/dd/YYYY'
@@ -3563,14 +3920,17 @@ def process_single_file(filename, input_folder, mapping_data):
                     fmt = 'MM.dd.YYYY'
                 elif DATE_YYYY_MM_DD.match(val):
                     fmt = 'YYYY-MM-DD'
+
                 if fmt:
                     ent = chunk.at[idx, 0]
-                    date_issues.setdefault(ent, {}).setdefault(col, {'count': 0, 'format': fmt})
+                    date_issues.setdefault(ent, {}).setdefault(
+                        col, {'count': 0, 'format': fmt}
+                    )
                     date_issues[ent][col]['count'] += 1
 
     # ---------- Validation Summary ----------
     def add(req, found, count, ent):
-        validation_rows.append({
+        validations.append({
             'File': filename,
             'Requirement': req,
             'Status': 'No Records Found' if not found else ('Fail' if count > 0 else 'Success'),
@@ -3578,23 +3938,25 @@ def process_single_file(filename, input_folder, mapping_data):
             'Entities': ent if count > 0 else None
         })
 
-    add('Itemization Date Null Count', itmz_found, itmz_date_null_count, 'ITMZ')
-    add('Account_ID Invalid Count (Null or Length <4)', acct_found, acct_invalid_count, 'ACCT')
-    add('Statute Expiration Date Null Count', acct_found, acct_exp_null_count, 'ACCT')
-    add('SOL Date Null Count (Position 33)', acct_found, acct_sol_null_count, 'ACCT')
-    add('Delinquency Date Null Count (Position 34)', acct_found, acct_delinquency_null_count, 'ACCT')
-    add('AFTRTYP Null Count', trnh_found, trnh_aftrtyp_null_count, 'TRNH')
-    add('PhoneNumber Null Count', callh_found, callh_phone_null_count, 'CALLH')
-    add('Both Firstname and Lastname Null Count', prty_found, prty_both_null_count, 'PRTY')
-    add('Email Invalid Count (Missing or No @)', email_found, email_invalid_count, 'EMAIL')
-    ##add('Patient First/Last Name Missing Count', pat_found, pat_name_missing_count, 'PAT')
-    add('Service Start Date Null Count (Position 7)', enc_found, enc_start_date_null_count, 'ENC')
-    add('Service End Date Null Count (Position 8)', enc_found, enc_end_date_null_count, 'ENC')
+    add('Account_ID Invalid Count', acct_found, acct_invalid, 'ACCT')
+    add('Statute Expiration Date Null Count', acct_found, acct_statute_null, 'ACCT')
+    add('ACCT – Service / Delinquency / Statute Date Presence Check',
+        acct_found, acct_all_three_missing, 'ACCT')
+    add('PhoneNumber Null Count', phone_found, phone_null, 'PHN')
+    add('Email Invalid Count (Missing or No @)', email_found, email_invalid, 'EMAIL')
+    add('Service Start Date Null Count', enc_found, enc_start_null, 'ENC')
+    add('Service End Date Null Count', enc_found, enc_end_null, 'ENC')
+    add('DIAGCD Type Invalid Count (Expected ENCOUNTER / CLAIM)',
+        diagcd_found, diagcd_invalid_type_count, 'DIAGCD')
+    add('LCASE Case ID (3rd field) Null Count',
+        lcase_found, lcase_caseid_null, 'LCASE')
+    add('LCASE Court ID (15th field) Null Count',
+        lcase_found, lcase_courtid_null, 'LCASE')
 
     if date_issues:
-        for ent, pos_data in date_issues.items():
-            for pos, info in pos_data.items():
-                validation_rows.append({
+        for ent, pdata in date_issues.items():
+            for pos, info in pdata.items():
+                validations.append({
                     'File': filename,
                     'Requirement': 'Date Format Validation',
                     'Status': 'Fail',
@@ -3602,7 +3964,7 @@ def process_single_file(filename, input_folder, mapping_data):
                     'Entities': f"{ent} – position {pos} – {info['format']}"
                 })
     else:
-        validation_rows.append({
+        validations.append({
             'File': filename,
             'Requirement': 'Date Format Validation',
             'Status': 'Success',
@@ -3610,20 +3972,10 @@ def process_single_file(filename, input_folder, mapping_data):
             'Entities': None
         })
 
-    for ent, pos_flags in required_empty_flags.items():
-        for pos, failed in pos_flags.items():
-            analysis_results.append({
-                'Entity': ent,
-                'File': filename,
-                'Column Number': pos,
-                'Status': 'Fail' if failed else 'Pass'
-            })
+    return list(required_summary.values()), validations
 
-    return analysis_results, missing_entities, file_issues, validation_rows
 
-# ----------------------
-# Main
-# ----------------------
+# ================= MAIN =================
 def analyze_required_columns(mapping_file, input_folder, output_file):
 
     mapping_data = pd.read_excel(mapping_file, sheet_name=None, header=1)
@@ -3632,7 +3984,8 @@ def analyze_required_columns(mapping_file, input_folder, output_file):
 
     txt_files = [f for f in os.listdir(input_folder) if f.lower().endswith('.txt')]
 
-    all_analysis, all_missing, all_file_issues, all_validations = [], set(), [], []
+    all_required = []
+    all_validations = []
 
     with ThreadPoolExecutor(MAX_WORKERS) as exe:
         futures = {
@@ -3640,21 +3993,21 @@ def analyze_required_columns(mapping_file, input_folder, output_file):
             for f in txt_files
         }
         for fut in as_completed(futures):
-            a, m, fi, v = fut.result()
-            all_analysis.extend(a)
-            all_missing.update(m)
-            all_file_issues.extend(fi)
-            all_validations.extend(v)
+            req, val = fut.result()
+            all_required.extend(req)
+            all_validations.extend(val)
+
+    req_df = pd.DataFrame(all_required)
+    req_df['Status'] = req_df.apply(
+        lambda r: 'Fail' if r['Empty Records'] > 0 else 'Pass', axis=1
+    )
 
     with pd.ExcelWriter(output_file, engine='xlsxwriter') as w:
-        pd.DataFrame(all_analysis).to_excel(w, 'Required_Columns_Summary', index=False)
-        pd.DataFrame(list(all_missing), columns=['Missing Entities in SAAS mapping sheet']).to_excel(w, 'Missing_Entities', index=False)
-        pd.DataFrame(all_file_issues).to_excel(w, 'Frequent_File_Issues', index=False)
+        req_df.to_excel(w, 'Required_Columns_Summary', index=False)
         pd.DataFrame(all_validations).to_excel(w, 'Validation_Summary', index=False)
 
-# ----------------------
-# CLI
-# ----------------------
+
+# ================= CLI =================
 if __name__ == "__main__":
     start = datetime.now()
     analyze_required_columns(

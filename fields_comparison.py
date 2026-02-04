@@ -1160,9 +1160,17 @@
 
 import pandas as pd
 import os
-import re
 
+# ================= CONFIG =================
+##TARGET_ENTITIES = {'ACCT', 'BAL', 'PRTY', 'ENC', 'INS'}
 
+TARGET_ENTITIES = {'ACCT', 'BAL', 'PRTY', 'ENC', 'INS', 'PHN', 'EMAIL', 'POE', 'PADD', 'LTRH', 'AKA', 'ACTH', 'TRNH', 'PDTR', 'PA', 'PS', 'ITMZ', 'RST', 'CALLH', 'MED', 'TIG', 'CUSTACCT'}
+
+ 
+
+# --------------------------------------------------
+# MAIN FUNCTION
+# --------------------------------------------------
 def compare_fields(mapping_file, input_folder, output_excel):
 
     # --------------------------------------------------
@@ -1174,11 +1182,17 @@ def compare_fields(mapping_file, input_folder, output_excel):
 
     # --------------------------------------------------
     # Build expected columns & required fields
+    # (ONLY TARGET ENTITIES)
     # --------------------------------------------------
     expected_columns = {}
     required_fields = {}
 
     for entity, sheet in mapping_data.items():
+        entity = str(entity).strip().upper()
+
+        if entity not in TARGET_ENTITIES:
+            continue
+
         position_col = next((c for c in sheet.columns if "Position" in c), None)
 
         if position_col:
@@ -1201,15 +1215,14 @@ def compare_fields(mapping_file, input_folder, output_excel):
     # --------------------------------------------------
     entity_results = {}
     required_summary = {}
-    sample_failed = {}   # max 5 samples per entity
+    sample_failed = {}
     variation_map = {}
-    varying_records = []
 
     # --------------------------------------------------
-    # Process input files (STREAM SAFE)
+    # Process input files
     # --------------------------------------------------
     for filename in os.listdir(input_folder):
-        if not filename.endswith(".txt"):
+        if not filename.lower().endswith(".txt"):
             continue
 
         file_path = os.path.join(input_folder, filename)
@@ -1220,35 +1233,37 @@ def compare_fields(mapping_file, input_folder, output_excel):
             for line in file:
                 record_number += 1
                 cols = line.rstrip("\n").split("|")
-                entity = cols[0].strip()
+                entity = cols[0].strip().upper()
 
-                if not entity:
+                if entity not in TARGET_ENTITIES:
                     continue
 
                 actual_count = len(cols)
                 expected_count = expected_columns.get(entity, 0)
                 key = (filename, entity)
 
-                # -------- Field count summary --------
+                # -------- Field count tracking --------
                 if key not in entity_results:
                     entity_results[key] = {
                         "expected": expected_count,
-                        "actual": actual_count,
-                        "status": "Pass" if actual_count == expected_count else "Fail"
+                        "actual_values": set(),
+                        "status": "Pass"
                     }
-                elif actual_count != entity_results[key]["actual"]:
-                    entity_results[key]["status"] = "Varying"
+
+                entity_results[key]["actual_values"].add(actual_count)
+
+                if actual_count != expected_count:
+                    entity_results[key]["status"] = "Fail"
 
                 line_entity_counts.setdefault(key, []).append(actual_count)
 
                 # -------- Required field summary --------
-                if entity not in required_summary:
-                    required_summary[entity] = {
-                        "required_fields": len(required_fields.get(entity, [])),
-                        "total_records": 0,
-                        "failed_records": 0,
-                        "fail_instances": 0
-                    }
+                required_summary.setdefault(entity, {
+                    "required_fields": len(required_fields.get(entity, [])),
+                    "total_records": 0,
+                    "failed_records": 0,
+                    "fail_instances": 0
+                })
 
                 required_summary[entity]["total_records"] += 1
 
@@ -1263,10 +1278,7 @@ def compare_fields(mapping_file, input_folder, output_excel):
                     required_summary[entity]["failed_records"] += 1
                     required_summary[entity]["fail_instances"] += len(missing)
 
-                    # Store only 5 samples
-                    if entity not in sample_failed:
-                        sample_failed[entity] = []
-
+                    sample_failed.setdefault(entity, [])
                     if len(sample_failed[entity]) < 5:
                         f, p, v = missing[0]
                         sample_failed[entity].append({
@@ -1290,24 +1302,45 @@ def compare_fields(mapping_file, input_folder, output_excel):
                 variation_map[entity]["count"] += len(counts)
 
     # --------------------------------------------------
-    # Output DataFrames
+    # Build Fields Comparison (WITH PIPE MISSED MESSAGE)
     # --------------------------------------------------
     fields_comp = []
-    for entity in expected_columns:
+
+    for entity in TARGET_ENTITIES:
         matches = [v for (f, e), v in entity_results.items() if e == entity]
-        input_val = "Not Found" if not matches else (
-            "Varying" if any(m["status"] == "Varying" for m in matches)
-            else matches[0]["actual"]
-        )
+
+        if not matches:
+            input_val = "Not Found"
+            remarks = "Entity not present in file"
+        else:
+            actual_values = sorted(matches[0]["actual_values"])
+            expected = expected_columns.get(entity, 0)
+
+            if len(actual_values) == 1:
+                actual = actual_values[0]
+                if actual == expected:
+                    input_val = actual
+                    remarks = "Pass"
+                else:
+                    diff = expected - actual
+                    input_val = actual
+                    remarks = f"{abs(diff)} pipe missed in file"
+            else:
+                input_val = "Varying"
+                remarks = "Inconsistent pipe count across records"
 
         fields_comp.append({
             "Entity": entity,
-            "SAAS Fields": expected_columns[entity],
-            "Input Fields": input_val
+            "SAAS Fields": expected_columns.get(entity, 0),
+            "Input Fields": input_val,
+            "Remarks": remarks
         })
 
     fields_df = pd.DataFrame(fields_comp)
 
+    # --------------------------------------------------
+    # Required summary
+    # --------------------------------------------------
     summary_df = pd.DataFrame([
         {
             "Entity": e,
@@ -1337,9 +1370,9 @@ def compare_fields(mapping_file, input_folder, output_excel):
     ])
 
     # --------------------------------------------------
-    # Write Excel (FAST)
+    # Write Excel
     # --------------------------------------------------
-    with pd.ExcelWriter(output_excel) as writer:
+    with pd.ExcelWriter(output_excel, engine="openpyxl") as writer:
         fields_df.to_excel(writer, sheet_name="Fields Comparison", index=False)
         summary_df.to_excel(writer, sheet_name="Required Summary", index=False)
         if not sample_df.empty:
@@ -1352,7 +1385,7 @@ def compare_fields(mapping_file, input_folder, output_excel):
 
 
 # --------------------------------------------------
-# Run
+# RUN
 # --------------------------------------------------
 if __name__ == "__main__":
     compare_fields(

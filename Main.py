@@ -196,8 +196,8 @@ def main():
         from Text_To_Excel import process_and_validate_files
 
         process_and_validate_files(config['expected_columns_per_sheet'], config['specific_words'], input_folder,
-
-                                   os.path.join(folder_parent, config['output_file_consolidated']),
+                                   
+                                  os.path.join(folder_parent, config['output_file_consolidated']),
 
                                    os.path.join(folder_parent, config['count_of_records_excel']),
 

@@ -2104,12 +2104,12 @@ def column_number_to_letter(column_number):
 # HARD-CODED LIST OF ALL ENTITIES (from your Fields Comparison output)
 # =============================================================================
 ALL_ENTITIES = [
-     'ACCT', 'ACT (2)', 'ACTH', 'AKA', 'ANOT', 'ATTY', 'BAL',
+     'ACCT',  'ACTH', 'AKA', 'ANOT', 'ATTY', 'BAL',
     'CALLH', 'CLAIM', 'CLMLN', 'CUSTACCT', 'CUSTPER', 'EMAIL', 'ENC',
      'INS', 'ITMZ', 
-    'LACTN', 'LCASE', 'LCNOT', 'LDOC', 'LJDG', 'LTRH', 'Lists', 'MED -obsolete',
+    'LACTN', 'LCASE', 'LCNOT', 'LDOC', 'LJDG', 'LTRH', 'Lists', 
     'PA', 'PADD', 'PAT', 'PDTR', 'PHN', 'PNOT', 'POE', 'PRTY',
-    'PS', 'PSC', 'PSK', 'RST',  'TIG', 'TRNH','TIGDATA'
+    'PS',  'RST',  'TIG', 'TRNH','TIGDATA'
 ]
 
 
@@ -2309,22 +2309,22 @@ def process_and_validate_files(expected_columns, specific_words, input_folder,
             empty_column_df = empty_column_df.sort_values(by='Empty Count', ascending=False)
 
         # --- Write validation + summary + empty columns ---
-        try:
-            with pd.ExcelWriter(output_excel, engine='openpyxl') as writer:
-                summary_df.to_excel(writer, sheet_name='Column Summary', index=False)
-                validation_df.to_excel(writer, sheet_name='Validation Results', index=False)
-            print(f"Success: Validation & Summary -> {output_excel}")
-        except Exception as e:
-            print(f"Error writing validation/summary: {e}")
-            return False
+        #try:
+            #with pd.ExcelWriter(output_excel, engine='openpyxl') as writer:
+                #summary_df.to_excel(writer, sheet_name='Column Summary', index=False)
+                #validation_df.to_excel(writer, sheet_name='Validation Results', index=False)
+            #print(f"Success: Validation & Summary -> {output_excel}")
+        #except Exception as e:
+            #print(f"Error writing validation/summary: {e}")
+            #return False
 
-        try:
-            with pd.ExcelWriter(empty_columns_summary_excel, engine='openpyxl') as writer:
-                empty_column_df.to_excel(writer, sheet_name='Empty Columns Summary', index=False)
-            print(f"Success: Empty Columns -> {empty_columns_summary_excel}")
-        except Exception as e:
-            print(f"Error writing empty columns: {e}")
-            return False
+        # try:
+        #     with pd.ExcelWriter(empty_columns_summary_excel, engine='openpyxl') as writer:
+        #         empty_column_df.to_excel(writer, sheet_name='Empty Columns Summary', index=False)
+        #     print(f"Success: Empty Columns -> {empty_columns_summary_excel}")
+        # except Exception as e:
+        #     print(f"Error writing empty columns: {e}")
+        #     return False
 
         # --- UPDATED: COUNT OF RECORDS - HARD-CODED ALL ENTITIES ---
         entity_count_data = [
@@ -2472,7 +2472,7 @@ if __name__ == "__main__":
     input_folder = "Input File"
     output_excel = "output_validation_summary.xlsx"
     count_of_records_excel = "output_count_analysis.xlsx"
-    empty_columns_summary_excel = "output_empty_columns.xlsx"
+    
 
     # Load mapping (only to get expected columns for validation)
     expected_columns = {}
@@ -2508,7 +2508,7 @@ if __name__ == "__main__":
         input_folder=input_folder,
         output_excel=output_excel,
         count_of_records_excel=count_of_records_excel,
-        empty_columns_summary_excel=empty_columns_summary_excel
+       
     )
 
     print("All processing completed." if success else "Processing failed.")
