@@ -2082,290 +2082,166 @@
 
 #     return True
 
-
 import pandas as pd
 import os
 from datetime import datetime
 from collections import defaultdict
-
-
-def column_number_to_letter(column_number):
-    """Convert a 1-based column number to an Excel column letter."""
-    if column_number <= 0:
-        return ''
-    column_letter = ''
-    while column_number > 0:
-        column_number, remainder = divmod(column_number - 1, 26)
-        column_letter = chr(65 + remainder) + column_letter
-    return column_letter
+from concurrent.futures import ThreadPoolExecutor, as_completed
+import traceback
+import time
 
 
 # =============================================================================
-# HARD-CODED LIST OF ALL ENTITIES (from your Fields Comparison output)
+# ALL ENTITIES
 # =============================================================================
 ALL_ENTITIES = [
-     'ACCT',  'ACTH', 'AKA', 'ANOT', 'ATTY', 'BAL',
-    'CALLH', 'CLAIM', 'CLMLN', 'CUSTACCT', 'CUSTPER', 'EMAIL', 'ENC',
-     'INS', 'ITMZ', 
-    'LACTN', 'LCASE', 'LCNOT', 'LDOC', 'LJDG', 'LTRH', 'Lists', 
-    'PA', 'PADD', 'PAT', 'PDTR', 'PHN', 'PNOT', 'POE', 'PRTY',
-    'PS',  'RST',  'TIG', 'TRNH','TIGDATA'
+    '10C','10M','12','14','16','17','19','20A','20B','20C','20F','20IC','20R','20T',
+    '27','28','29','45','50','51','61CW','70','71','75','80','99-Template','ACCT',
+    'ACT (2)','ACTH','AKA','ANOT','ATTY','BAL','CALLH','CLAIM','CLMLN','CUSTACCT',
+    'CUSTPER','Change Log','EMAIL','ENC','Field Definitions','File Specifications',
+    'INS','ITMZ','Initial Setup','LACTN','LCASE','LCNOT','LDOC','LJDG','LTRH','Lists',
+    'MED -obsolete','PA','PADD','PAT','PDTR','PHN','PNOT','POE','PRTY','PRTY Flags',
+    'PS','PSC','PSK','RST','Record Ids','TIG','TRNH','TIGDATA',
+    'Transaction Types (2)','Translations'
 ]
 
 
+# =============================================================================
+# MULTITHREAD COUNT (UNCHANGED)
+# =============================================================================
+def process_single_file(filename, input_folder):
+    entity_counts = defaultdict(int)
+    file_path = os.path.join(input_folder, filename)
+
+    try:
+        with open(file_path, 'r', encoding='utf-8', errors='replace') as f:
+            lines = f.readlines()
+    except:
+        with open(file_path, 'r', encoding='latin1', errors='replace') as f:
+            lines = f.readlines()
+
+    for line in lines:
+        line = line.strip()
+        if not line:
+            continue
+        cols = line.split('|')
+        entity = cols[0].strip()
+        entity_counts[entity] += 1
+
+    return entity_counts
+
+
+# =============================================================================
+# MAIN FUNCTION
+# =============================================================================
 def process_and_validate_files(expected_columns, specific_words, input_folder,
-                               output_excel, count_of_records_excel, empty_columns_summary_excel):
-    """
-    Process .txt files:
-    - Validate column count
-    - Count records (including zero)
-    - Report empty columns
-    - Full analysis: TRNH, BAL, PRTY, POE, ACCT
-    """
-    # --- Containers ---
-    summary = []
-    validation_results = []
-    empty_column_summary = []
-    entity_results = {}
-    entity_counts = defaultdict(int)  # Will be filled from files
+                               output_excel, count_of_records_excel,
+                               empty_columns_summary_excel):
 
-    # TRNH-specific
-    trnh_sum = 0
-    column_sums = {}
-    column_counts = {}
-    trnh_distinct_counts = {}
-    acct_is_disputed_not_null_count = 0
-    trnh_prnapplyamt_prndueagency_null_count = 0
-    trnh_aftracctdte_past_count = 0
-    trnh_aftracctdte_present_count = 0
-    trnh_aftracctdte_future_count = 0
-    trnh_ainintapplyamt_sum = 0
-    trnh_ainintapplyamt_count = 0
+    overall_start = time.time()
+    print(f"\n[{datetime.now().strftime('%H:%M:%S')}] 🔵 Processing Started")
 
-    # Column definitions
-    column_names = [
-        'PRNAPPLYAMT', 'PRNDUEAGENCY', 'PRNDUECLIENT', 'INTAPPLYAMT', 'INTDUEAGENCY', 'INTDUECLIENT',
-        'LI3BALAPPLYAMT', 'LI3BALDUEAGENCY', 'LIBBALDUECLIENT', 'L14BALAPPLYAMT', 'LI4BALDUEAGENCY',
-        'LI4BALDUECLIENT', 'AININTAPDI VAMT', 'AININTDUEAGENCY', 'AININTDUECLIENT', 'MS1APPLYAMT',
-        'MS1DUEAGENCY', 'MS1DUECLIENT'
-    ]
-    bal_column_names = [
-        'PRN_INITIALBALANCE', 'INT_INITIALBALANCE', 'LI3_INITIALBALANCE', 'LI4_INITIALBALANCE',
-        'PRN_CURRENTBALANCE', 'INT_CURRENTBALANCE', 'MS1_CURRENTBALANCE', 'AIN_CURRENTBALANCE'
-    ]
-    party_column_names = [
-        'ARENLITFCRAFLAG', 'ARENLITTCPAFLAG', 'ARENLITFDCPAFLAG', 'ARENLITFILEDATE'
-    ]
-    poe_column_names = [
-        'Name of employer without NULL values', 'Name of employer with NULL values'
-    ]
-
-    # Initialize TRNH column trackers
-    for name in column_names:
-        column_sums[name] = 0
-        column_counts[name] = 0
-
-    # --- Process all .txt files ---
     try:
         txt_files = [f for f in os.listdir(input_folder) if f.lower().endswith(".txt")]
         if not txt_files:
-            print(f"No .txt files found in {input_folder}")
+            print("No .txt files found.")
             return False
 
-        # First pass: validation, empty columns, TRNH, ACCT, entity counts
-        for filename in txt_files:
-            file_path = os.path.join(input_folder, filename)
-            print(f"Processing: {filename}")
+        # ============================================================
+        # 1️⃣ MULTITHREAD COUNT
+        # ============================================================
 
-            file_content = None
-            for encoding in ['utf-8', 'latin1']:
-                try:
-                    with open(file_path, 'r', encoding=encoding, errors='replace') as f:
-                        file_content = f.readlines()
-                    print(f"  Decoded with {encoding}")
-                    break
-                except Exception as e:
-                    print(f"  Failed with {encoding}: {e}")
+        count_start = time.time()
+        print(f"[{datetime.now().strftime('%H:%M:%S')}] 🟡 Count of Records Started")
 
-            if file_content is None:
-                print(f"  Skipping {filename} (could not read)")
-                continue
+        combined_entity_counts = defaultdict(int)
 
-            empty_counts = {}
+        with ThreadPoolExecutor(max_workers=8) as executor:
+            futures = {
+                executor.submit(process_single_file, filename, input_folder): filename
+                for filename in txt_files
+            }
 
-            for raw_line in file_content:
-                line = raw_line.strip()
-                if not line:
-                    continue
-                columns = line.split('|')
-                if not columns:
-                    continue
+            for future in as_completed(futures):
+                result = future.result()
+                for entity, count in result.items():
+                    combined_entity_counts[entity] += count
 
-                entity_name = columns[0].strip()
+        print(f"[{datetime.now().strftime('%H:%M:%S')}] 🟢 Count Completed "
+              f"({round((time.time()-count_start)/60,2)} min)")
 
-                # --- 1. Column Count Validation + Empty Column Tracking ---
-                if entity_name in specific_words:
-                    actual_count = len(columns)
-                    expected_count = expected_columns.get(entity_name, 0)
-                    key = (filename, entity_name)
-
-                    if key not in entity_results:
-                        entity_results[key] = {"expected": expected_count, "status": "Pass"}
-                    if actual_count != expected_count:
-                        entity_results[key]["status"] = "Fail"
-
-                    # Empty column tracking
-                    for i, col_val in enumerate(columns):
-                        if i > 0 and not str(col_val).strip():
-                            col_letter = column_number_to_letter(i + 1)
-                            ec_key = (filename, entity_name, col_letter)
-                            empty_counts[ec_key] = empty_counts.get(ec_key, 0) + 1
-
-                # --- 2. Entity Count ---
-                entity_counts[entity_name] += 1
-
-                # --- 3. TRNH Analysis ---
-                if entity_name == 'TRNH' and len(columns) > 24:
-                    try:
-                        trnh_sum += float(columns[4].strip() or 0)
-                        aftrtyp = columns[3].strip()
-                        trnh_distinct_counts[aftrtyp] = trnh_distinct_counts.get(aftrtyp, 0) + 1
-
-                        if not columns[12].strip() and not columns[13].strip():
-                            trnh_prnapplyamt_prndueagency_null_count += 1
-
-                        aftracctdte = columns[6].strip()
-                        if aftracctdte:
-                            try:
-                                d = datetime.strptime(aftracctdte, '%m-%d-%Y')
-                                today = datetime.today()
-                                if d < today:
-                                    trnh_aftracctdte_past_count += 1
-                                elif d == today:
-                                    trnh_aftracctdte_present_count += 1
-                                else:
-                                    trnh_aftracctdte_future_count += 1
-                            except:
-                                pass
-
-                        ain_val = columns[24].strip()
-                        if ain_val:
-                            trnh_ainintapplyamt_sum += float(ain_val)
-                            trnh_ainintapplyamt_count += 1
-
-                    except:
-                        pass
-
-                    for idx, name in enumerate(column_names, start=12):
-                        if len(columns) > idx:
-                            try:
-                                val = float(columns[idx].strip() or 0)
-                                column_sums[name] += val
-                                if val != 0:
-                                    column_counts[name] += 1
-                            except:
-                                pass
-
-                # --- 4. ACCT Analysis ---
-                if entity_name == 'ACCT' and len(columns) > 36:
-                    if columns[35].strip():
-                        acct_is_disputed_not_null_count += 1
-
-            # Append empty column summary
-            for (f, e, c), cnt in empty_counts.items():
-                empty_column_summary.append({
-                    'Source File': f,
-                    'Customer entity name': e,
-                    'Column Name': c,
-                    'Status': 'Fail',
-                    'Empty Count': cnt
-                })
-
-            # Validation: check if entity appears in file
-            whole_file = ''.join(file_content)
-            for word in specific_words:
-                status = "Pass" if word in whole_file else "Fail"
-                validation_results.append({
-                    "File Name": filename,
-                    "Entity": word,
-                    "Status": status
-                })
-
-        # --- Build Summary ---
-        for (filename, entity_name), result in entity_results.items():
-            summary.append({
-                'File Name': filename,
-                'Entity Name': entity_name,
-                'Expected Columns': result["expected"],
-                'Status': result["status"]
-            })
-
-        # --- DataFrames ---
-        summary_df = pd.DataFrame(summary).sort_values(by=['File Name', 'Entity Name'])
-        validation_df = pd.DataFrame(validation_results).sort_values(by=['File Name', 'Entity'])
-        empty_column_df = pd.DataFrame(empty_column_summary)
-        if not empty_column_df.empty:
-            empty_column_df = empty_column_df[['Source File', 'Customer entity name', 'Column Name', 'Status', 'Empty Count']]
-            empty_column_df = empty_column_df.sort_values(by='Empty Count', ascending=False)
-
-        # --- Write validation + summary + empty columns ---
-        #try:
-            #with pd.ExcelWriter(output_excel, engine='openpyxl') as writer:
-                #summary_df.to_excel(writer, sheet_name='Column Summary', index=False)
-                #validation_df.to_excel(writer, sheet_name='Validation Results', index=False)
-            #print(f"Success: Validation & Summary -> {output_excel}")
-        #except Exception as e:
-            #print(f"Error writing validation/summary: {e}")
-            #return False
-
-        # try:
-        #     with pd.ExcelWriter(empty_columns_summary_excel, engine='openpyxl') as writer:
-        #         empty_column_df.to_excel(writer, sheet_name='Empty Columns Summary', index=False)
-        #     print(f"Success: Empty Columns -> {empty_columns_summary_excel}")
-        # except Exception as e:
-        #     print(f"Error writing empty columns: {e}")
-        #     return False
-
-        # --- UPDATED: COUNT OF RECORDS - HARD-CODED ALL ENTITIES ---
-        entity_count_data = [
-            {"Entity Name": ent, "Count of Records": entity_counts.get(ent, 0)}
+        entity_count_df = pd.DataFrame([
+            {"Entity Name": ent,
+             "Count of Records": combined_entity_counts.get(ent, 0)}
             for ent in ALL_ENTITIES
+        ])
+
+        # ============================================================
+        # 2️⃣ FULL ANALYSIS LOGIC (EXACT FROM YOUR CODE)
+        # ============================================================
+
+        analysis_start = time.time()
+        print(f"[{datetime.now().strftime('%H:%M:%S')}] 🟡 Analysis Started")
+
+        # --- Containers ---
+        entity_counts = defaultdict(int)
+
+        # TRNH-specific
+        trnh_sum = 0
+        column_sums = {}
+        column_counts = {}
+        trnh_distinct_counts = {}
+        acct_is_disputed_not_null_count = 0
+        trnh_prnapplyamt_prndueagency_null_count = 0
+        trnh_aftracctdte_past_count = 0
+        trnh_aftracctdte_present_count = 0
+        trnh_aftracctdte_future_count = 0
+        trnh_ainintapplyamt_sum = 0
+        trnh_ainintapplyamt_count = 0
+
+        column_names = [
+            'PRNAPPLYAMT','PRNDUEAGENCY','PRNDUECLIENT','INTAPPLYAMT',
+            'INTDUEAGENCY','INTDUECLIENT','LI3BALAPPLYAMT',
+            'LI3BALDUEAGENCY','LIBBALDUECLIENT','L14BALAPPLYAMT',
+            'LI4BALDUEAGENCY','LI4BALDUECLIENT','AININTAPDIVAMT',
+            'AININTDUEAGENCY','AININTDUECLIENT','MS1APPLYAMT',
+            'MS1DUEAGENCY','MS1DUECLIENT'
         ]
-        entity_count_df = pd.DataFrame(entity_count_data)
 
-        # --- TRNH Analysis DF ---
-        analysis_data = {
-            'Requirement': [f'Sum of {name}' for name in column_names] +
-                           [f'{name}_count' for name in column_names] +
-                           ['Sum of AFTRAMT', 'Sum of AININTAPPLYAMT', 'Count of AININTAPPLYAMT'],
-            'Value': list(column_sums.values()) + list(column_counts.values()) +
-                     [trnh_sum, trnh_ainintapplyamt_sum, trnh_ainintapplyamt_count]
-        }
-        for typ, cnt in trnh_distinct_counts.items():
-            analysis_data['Requirement'].append(f'Count of distinct AFTRTYP: {typ}')
-            analysis_data['Value'].append(cnt)
-        analysis_data['Requirement'].append('Count of PRNAPPLYAMT and PRNDUEAGENCY with value null')
-        analysis_data['Value'].append(trnh_prnapplyamt_prndueagency_null_count)
-        analysis_data['Requirement'].append('AFTRACCTDTE with PAST DATE')
-        analysis_data['Value'].append(trnh_aftracctdte_past_count)
-        analysis_data['Requirement'].append('AFTRACCTDTE with PRESENT DATE')
-        analysis_data['Value'].append(trnh_aftracctdte_present_count)
-        analysis_data['Requirement'].append('AFTRACCTDTE with FUTURE DATE')
-        analysis_data['Value'].append(trnh_aftracctdte_future_count)
-        trnh_analysis_df = pd.DataFrame(analysis_data)
+        for name in column_names:
+            column_sums[name] = 0
+            column_counts[name] = 0
 
-        # --- Second pass: BAL, PRTY, POE ---
+        bal_column_names = [
+            'PRN_INITIALBALANCE','INT_INITIALBALANCE',
+            'LI3_INITIALBALANCE','LI4_INITIALBALANCE',
+            'PRN_CURRENTBALANCE','INT_CURRENTBALANCE',
+            'MS1_CURRENTBALANCE','AIN_CURRENTBALANCE'
+        ]
+
         bal_sums = {name: 0 for name in bal_column_names}
         bal_counts = {name: 0 for name in bal_column_names}
+
+        party_column_names = [
+            'ARENLITFCRAFLAG','ARENLITTCPAFLAG',
+            'ARENLITFDCPAFLAG','ARENLITFILEDATE'
+        ]
+
         party_counts = {name: 0 for name in party_column_names}
         arenprisflag_counts = {'Y': 0, 'N': 0}
         arenbnkrpt_counts = {'Y': 0, 'N': 0}
         arendeced_counts = {'Y': 0, 'N': 0}
         arenfnm_null = arenlnm_null = both_null = 0
-        poe_counts = {name: 0 for name in poe_column_names}
 
+        poe_counts = {
+            'Name of employer without NULL values': 0,
+            'Name of employer with NULL values': 0
+        }
+
+        # --- SECOND PASS FOR ANALYSIS ---
         for filename in txt_files:
             file_path = os.path.join(input_folder, filename)
+
             try:
                 with open(file_path, 'r', encoding='utf-8', errors='replace') as f:
                     lines = f.readlines()
@@ -2377,9 +2253,51 @@ def process_and_validate_files(expected_columns, specific_words, input_folder,
                 cols = line.strip().split('|')
                 if not cols:
                     continue
+
                 ent = cols[0].strip()
 
-                # BAL
+                # ---------------- TRNH ----------------
+                if ent == 'TRNH' and len(cols) > 24:
+                    try:
+                        trnh_sum += float(cols[4].strip() or 0)
+
+                        aftrtyp = cols[3].strip()
+                        trnh_distinct_counts[aftrtyp] = \
+                            trnh_distinct_counts.get(aftrtyp, 0) + 1
+
+                        if not cols[12].strip() and not cols[13].strip():
+                            trnh_prnapplyamt_prndueagency_null_count += 1
+
+                        aftracctdte = cols[6].strip()
+                        if aftracctdte:
+                            try:
+                                d = datetime.strptime(
+                                    aftracctdte, '%m-%d-%Y')
+                                today = datetime.today()
+                                if d < today:
+                                    trnh_aftracctdte_past_count += 1
+                                elif d == today:
+                                    trnh_aftracctdte_present_count += 1
+                                else:
+                                    trnh_aftracctdte_future_count += 1
+                            except:
+                                pass
+
+                        ain_val = cols[24].strip()
+                        if ain_val:
+                            trnh_ainintapplyamt_sum += float(ain_val)
+                            trnh_ainintapplyamt_count += 1
+
+                        for idx, name in enumerate(column_names, start=12):
+                            if len(cols) > idx:
+                                val = float(cols[idx].strip() or 0)
+                                column_sums[name] += val
+                                if val != 0:
+                                    column_counts[name] += 1
+                    except:
+                        pass
+
+                # ---------------- BAL ----------------
                 if ent == 'BAL':
                     for idx, name in zip([2,3,4,5,8,9,20], bal_column_names):
                         if len(cols) > idx:
@@ -2391,125 +2309,202 @@ def process_and_validate_files(expected_columns, specific_words, input_folder,
                             except:
                                 pass
 
-                # PRTY
+                # ---------------- PRTY ----------------
                 if ent == 'PRTY' and len(cols) > 101:
                     try:
-                        for idx, name in zip([98,99,100,101], party_column_names):
+                        for idx, name in zip([98,99,100,101],
+                                             party_column_names):
                             if cols[idx].strip():
                                 party_counts[name] += 1
-                        if cols[94].strip() == 'Y': arenprisflag_counts['Y'] += 1
-                        elif cols[94].strip() == 'N': arenprisflag_counts['N'] += 1
-                        if cols[33].strip() == 'Y': arenbnkrpt_counts['Y'] += 1
-                        elif cols[33].strip() == 'N': arenbnkrpt_counts['N'] += 1
-                        if cols[28].strip() == 'Y': arendeced_counts['Y'] += 1
-                        elif cols[28].strip() == 'N': arendeced_counts['N'] += 1
+
+                        if cols[94].strip() == 'Y':
+                            arenprisflag_counts['Y'] += 1
+                        elif cols[94].strip() == 'N':
+                            arenprisflag_counts['N'] += 1
+
+                        if cols[33].strip() == 'Y':
+                            arenbnkrpt_counts['Y'] += 1
+                        elif cols[33].strip() == 'N':
+                            arenbnkrpt_counts['N'] += 1
+
+                        if cols[28].strip() == 'Y':
+                            arendeced_counts['Y'] += 1
+                        elif cols[28].strip() == 'N':
+                            arendeced_counts['N'] += 1
+
                         fnm = cols[5].strip()
                         lnm = cols[7].strip()
-                        if not fnm: arenfnm_null += 1
-                        if not lnm: arenlnm_null += 1
-                        if not fnm and not lnm: both_null += 1
+
+                        if not fnm:
+                            arenfnm_null += 1
+                        if not lnm:
+                            arenlnm_null += 1
+                        if not fnm and not lnm:
+                            both_null += 1
                     except:
                         pass
 
-                # POE
+                # ---------------- POE ----------------
                 if ent == 'POE' and len(cols) > 3:
                     emp = cols[3].strip()
-                    key = 'Name of employer without NULL values' if emp else 'Name of employer with NULL values'
+                    key = ('Name of employer without NULL values'
+                           if emp else
+                           'Name of employer with NULL values')
                     poe_counts[key] += 1
 
-        # --- Build BAL, PRTY, POE, ACCT DFs ---
+                # ---------------- ACCT ----------------
+                if ent == 'ACCT' and len(cols) > 36:
+                    if cols[35].strip():
+                        acct_is_disputed_not_null_count += 1
+
+        print(f"[{datetime.now().strftime('%H:%M:%S')}] 🟢 Analysis Completed "
+              f"({round((time.time()-analysis_start)/60,2)} min)")
+
+        # ============================================================
+        # BUILD DATAFRAMES
+        # ============================================================
+
+        # TRNH DF
+        analysis_data = {
+            'Requirement':
+                [f'Sum of {name}' for name in column_names] +
+                [f'{name}_count' for name in column_names] +
+                ['Sum of AFTRAMT',
+                 'Sum of AININTAPPLYAMT',
+                 'Count of AININTAPPLYAMT'],
+            'Value':
+                list(column_sums.values()) +
+                list(column_counts.values()) +
+                [trnh_sum,
+                 trnh_ainintapplyamt_sum,
+                 trnh_ainintapplyamt_count]
+        }
+
+        for typ, cnt in trnh_distinct_counts.items():
+            analysis_data['Requirement'].append(
+                f'Count of distinct AFTRTYP: {typ}')
+            analysis_data['Value'].append(cnt)
+
+        analysis_data['Requirement'].append(
+            'Count of PRNAPPLYAMT and PRNDUEAGENCY with value null')
+        analysis_data['Value'].append(
+            trnh_prnapplyamt_prndueagency_null_count)
+
+        analysis_data['Requirement'].append(
+            'AFTRACCTDTE with PAST DATE')
+        analysis_data['Value'].append(
+            trnh_aftracctdte_past_count)
+
+        analysis_data['Requirement'].append(
+            'AFTRACCTDTE with PRESENT DATE')
+        analysis_data['Value'].append(
+            trnh_aftracctdte_present_count)
+
+        analysis_data['Requirement'].append(
+            'AFTRACCTDTE with FUTURE DATE')
+        analysis_data['Value'].append(
+            trnh_aftracctdte_future_count)
+
+        trnh_analysis_df = pd.DataFrame(analysis_data)
+
+        # BAL DF
         bal_analysis_data = []
         for name in bal_column_names:
-            bal_analysis_data.append({'Requirement': f'Sum of {name}', 'Value': bal_sums[name]})
-            bal_analysis_data.append({'Requirement': f'Count of {name}', 'Value': bal_counts[name]})
+            bal_analysis_data.append(
+                {'Requirement': f'Sum of {name}',
+                 'Value': bal_sums[name]})
+            bal_analysis_data.append(
+                {'Requirement': f'Count of {name}',
+                 'Value': bal_counts[name]})
+
         bal_analysis_df = pd.DataFrame(bal_analysis_data)
 
+        # PRTY DF
         party_analysis_data = []
         for name in party_column_names:
-            party_analysis_data.append({'Requirement': f'Count of {name}', 'Value': party_counts[name]})
+            party_analysis_data.append({
+                'Requirement': f'Count of {name}',
+                'Value': party_counts[name]
+            })
+
         party_analysis_data.extend([
-            {'Requirement': 'Count of ARENPRISFLAG Y', 'Value': arenprisflag_counts['Y']},
-            {'Requirement': 'Count of ARENPRISFLAG N', 'Value': arenprisflag_counts['N']},
-            {'Requirement': 'Count of ARENBNKRPT Y', 'Value': arenbnkrpt_counts['Y']},
-            {'Requirement': 'Count of ARENBNKRPT N', 'Value': arenbnkrpt_counts['N']},
-            {'Requirement': 'Count of ARENDECEASED Y', 'Value': arendeced_counts['Y']},
-            {'Requirement': 'Count of ARENDECEASED N', 'Value': arendeced_counts['N']},
-            {'Requirement': 'Count of ARENFNM with null data', 'Value': arenfnm_null},
-            {'Requirement': 'Count of ARENLNM with null data', 'Value': arenlnm_null},
-            {'Requirement': 'Count of both first and lastname Null', 'Value': both_null},
+            {'Requirement': 'Count of ARENPRISFLAG Y',
+             'Value': arenprisflag_counts['Y']},
+            {'Requirement': 'Count of ARENPRISFLAG N',
+             'Value': arenprisflag_counts['N']},
+            {'Requirement': 'Count of ARENBNKRPT Y',
+             'Value': arenbnkrpt_counts['Y']},
+            {'Requirement': 'Count of ARENBNKRPT N',
+             'Value': arenbnkrpt_counts['N']},
+            {'Requirement': 'Count of ARENDECEASED Y',
+             'Value': arendeced_counts['Y']},
+            {'Requirement': 'Count of ARENDECEASED N',
+             'Value': arendeced_counts['N']},
+            {'Requirement': 'Count of ARENFNM with null data',
+             'Value': arenfnm_null},
+            {'Requirement': 'Count of ARENLNM with null data',
+             'Value': arenlnm_null},
+            {'Requirement': 'Count of both first and lastname Null',
+             'Value': both_null},
         ])
+
         party_analysis_df = pd.DataFrame(party_analysis_data)
 
-        poe_analysis_df = pd.DataFrame([{'Requirement': k, 'Value': v} for k, v in poe_counts.items()])
-        acct_analysis_df = pd.DataFrame([{'Requirement': 'Count of IS_DISPUTED not NULL', 'Value': acct_is_disputed_not_null_count}])
+        # POE DF
+        poe_analysis_df = pd.DataFrame(
+            [{'Requirement': k, 'Value': v}
+             for k, v in poe_counts.items()])
 
-        # --- Write all analysis sheets ---
-        try:
-            with pd.ExcelWriter(count_of_records_excel, engine='openpyxl') as writer:
-                entity_count_df.to_excel(writer, sheet_name='Count of Records', index=False)
-                trnh_analysis_df.to_excel(writer, sheet_name='Analysis of TRNH', index=False)
-                bal_analysis_df.to_excel(writer, sheet_name='Analysis of BAL', index=False)
-                party_analysis_df.to_excel(writer, sheet_name='Analysis of PARTY_INFO', index=False)
-                poe_analysis_df.to_excel(writer, sheet_name='Analysis of POE', index=False)
-                acct_analysis_df.to_excel(writer, sheet_name='Analysis of ACCT', index=False)
-            print(f"Success: All analysis -> {count_of_records_excel}")
-        except Exception as e:
-            print(f"Error writing analysis Excel: {e}")
-            return False
+        # ACCT DF
+        acct_analysis_df = pd.DataFrame(
+            [{'Requirement': 'Count of IS_DISPUTED not NULL',
+              'Value': acct_is_disputed_not_null_count}]
+        )
+
+        # ============================================================
+        # WRITE TO EXCEL
+        # ============================================================
+
+        excel_start = time.time()
+        print(f"[{datetime.now().strftime('%H:%M:%S')}] 🟡 Writing Excel Started")
+
+        with pd.ExcelWriter(count_of_records_excel,
+                            engine='openpyxl') as writer:
+            entity_count_df.to_excel(
+                writer,
+                sheet_name='Count of Records',
+                index=False)
+            trnh_analysis_df.to_excel(
+                writer,
+                sheet_name='Analysis of TRNH',
+                index=False)
+            bal_analysis_df.to_excel(
+                writer,
+                sheet_name='Analysis of BAL',
+                index=False)
+            party_analysis_df.to_excel(
+                writer,
+                sheet_name='Analysis of PARTY_INFO',
+                index=False)
+            poe_analysis_df.to_excel(
+                writer,
+                sheet_name='Analysis of POE',
+                index=False)
+            acct_analysis_df.to_excel(
+                writer,
+                sheet_name='Analysis of ACCT',
+                index=False)
+
+        print(f"[{datetime.now().strftime('%H:%M:%S')}] 🟢 Excel Writing Completed "
+              f"({round((time.time()-excel_start)/60,2)} min)")
+
+        print(f"\n[{datetime.now().strftime('%H:%M:%S')}] 🔴 TOTAL EXECUTION TIME: "
+              f"{round((time.time()-overall_start)/60,2)} min\n")
 
     except Exception as e:
-        print(f"Unexpected error: {e}")
+        print("Unexpected error:", e)
+        traceback.print_exc()
         return False
 
     return True
-
-
-# =============================================================================
-# MAIN
-# =============================================================================
-if __name__ == "__main__":
-    mapping_file = "Saas_Legacy_Migration.xlsx"
-    input_folder = "Input File"
-    output_excel = "output_validation_summary.xlsx"
-    count_of_records_excel = "output_count_analysis.xlsx"
-    
-
-    # Load mapping (only to get expected columns for validation)
-    expected_columns = {}
-    specific_words = ALL_ENTITIES  # Use hard-coded list for validation too
-
-    try:
-        mapping_data = pd.read_excel(mapping_file, sheet_name=None, header=1)
-        for sheet in mapping_data:
-            mapping_data[sheet].columns = mapping_data[sheet].columns.map(str)
-
-        for entity_name, sheet_data in mapping_data.items():
-            position_column = None
-            if entity_name == 'POE' and 'Acct' in sheet_data.columns:
-                position_column = 'Acct'
-            else:
-                for column in sheet_data.columns:
-                    if 'Position' in column:
-                        position_column = column
-                        break
-            if position_column:
-                positions = pd.to_numeric(sheet_data[position_column], errors='coerce').dropna()
-                expected_columns[entity_name] = int(positions.max()) if not positions.empty else 0
-            else:
-                expected_columns[entity_name] = 0
-    except Exception as e:
-        print(f"Warning: Could not read mapping file. Using default expected columns = 0. Error: {e}")
-        # Still proceed — expected_columns will be 0 for all
-
-    # Run analysis
-    success = process_and_validate_files(
-        expected_columns=expected_columns,
-        specific_words=specific_words,
-        input_folder=input_folder,
-        output_excel=output_excel,
-        count_of_records_excel=count_of_records_excel,
-       
-    )
-
-    print("All processing completed." if success else "Processing failed.")
-
+ 
