@@ -2095,14 +2095,11 @@ import time
 # ALL ENTITIES
 # =============================================================================
 ALL_ENTITIES = [
-    '10C','10M','12','14','16','17','19','20A','20B','20C','20F','20IC','20R','20T',
-    '27','28','29','45','50','51','61CW','70','71','75','80','99-Template','ACCT',
-    'ACT (2)','ACTH','AKA','ANOT','ATTY','BAL','CALLH','CLAIM','CLMLN','CUSTACCT',
-    'CUSTPER','Change Log','EMAIL','ENC','Field Definitions','File Specifications',
-    'INS','ITMZ','Initial Setup','LACTN','LCASE','LCNOT','LDOC','LJDG','LTRH','Lists',
-    'MED -obsolete','PA','PADD','PAT','PDTR','PHN','PNOT','POE','PRTY','PRTY Flags',
-    'PS','PSC','PSK','RST','Record Ids','TIG','TRNH','TIGDATA',
-    'Transaction Types (2)','Translations'
+   'ACCT','ACTH','AKA','ANOT','ATTY','BAL','CALLH','CLAIM','CLMLN','CUSTACCT',
+    'CUSTPER','EMAIL','ENC','DIAGCD',
+    'INS','ITMZ','LACTN','LCASE','LCNOT','LDOC','LJDG','LTRH',
+    'PA','PADD','PAT','PDTR','PHN','PNOT','POE','PRTY',
+    'PS','RST','TIG','TRNH','TIGDATA'
 ]
 
 
